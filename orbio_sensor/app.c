@@ -1,0 +1,2118 @@
+/***************************************************************************//**
+ * @file
+ * @brief Core application logic.
+ *******************************************************************************
+ * # License
+ * <b>Copyright 2020 Silicon Laboratories Inc. www.silabs.com</b>
+ *******************************************************************************
+ *
+ * SPDX-License-Identifier: Zlib
+ *
+ * The licensor of this software is Silicon Laboratories Inc.
+ *
+ * This software is provided 'as-is', without any express or implied
+ * warranty. In no event will the authors be held liable for any damages
+ * arising from the use of this software.
+ *
+ * Permission is granted to anyone to use this software for any purpose,
+ * including commercial applications, and to alter it and redistribute it
+ * freely, subject to the following restrictions:
+ *
+ * 1. The origin of this software must not be misrepresented; you must not
+ *    claim that you wrote the original software. If you use this software
+ *    in a product, an acknowledgment in the product documentation would be
+ *    appreciated but is not required.
+ * 2. Altered source versions must be plainly marked as such, and must not be
+ *    misrepresented as being the original software.
+ * 3. This notice may not be removed or altered from any source distribution.
+ *
+ ******************************************************************************/
+#include "em_common.h"
+#include "app_assert.h"
+#include "sl_bluetooth.h"
+#include "gatt_db.h"
+#include "em_gpio.h"
+#include "em_cmu.h"
+#include "sl_cli.h"
+#include "sli_clock_manager_hal.h"
+#include "sl_iostream_usart_inst0_config.h"
+#include "app.h"
+#include "gpiointerrupt.h"
+#include "ktd2052a.h"
+#include "max86171.h"
+#include "ppg_agc.h"
+#include "accel.h"
+
+#define VERSION (15)
+
+// Types of prints
+#define PRINT_INIT printf
+#define PRINT_INFO printf
+#define PRINT_DEBUG printf
+#define PRINT_ERROR printf
+
+/**************************************************************************************************
+    Active module Defines and Variables.
+**************************************************************************************************/
+
+typedef enum
+{
+    ACTIVE_MODULE_NONE = 0,
+    ACTIVE_MODULE_SWEEP = 1 << 1,
+    ACTIVE_MODULE_PPG = 1 << 2,
+    ACTIVE_MODULE_ACCEL = 1 << 3,
+    ACTIVE_MODULE_BLE = 1 << 4,
+    ACTIVE_MODULE_CLI = 1 << 5,
+} app_module_t;
+
+static app_module_t active_module;
+// Index them from bit shifted version of active_module using __builtin_ctz
+static char *moduleNames[] = {"None", "Sweep", "PPG", "Accel", "BLE", "CLI"};
+static uint8_t moduleLedColours[] = {COLOUR_NONE, COLOUR_BLUE, COLOUR_GREEN, COLOUR_YELLOW, COLOUR_MAGENTA, COLOUR_NONE};
+
+static const char *getModuleName(app_module_t module)
+{
+    if (module == ACTIVE_MODULE_NONE)
+        return "None";
+    return moduleNames[__builtin_ctz(module)];
+}
+
+// TODO: What if a module is stopped from CLI or BLE, and there is a timer/interrupt that just triggers
+// TODO: Current handleNewPacket does not work if two or more packet types have to be interspersed
+// TODO: VBAT_ADC periodic read and battery status check
+
+/**************************************************************************************************
+    Sleep/Wake States Defines and Variables.
+**************************************************************************************************/
+
+typedef enum
+{
+    SLEEP_STATE_SLEEP = 1,
+    SLEEP_STATE_WAKE = 2
+} sleep_state_t;
+static volatile sleep_state_t sleepState;
+
+/**************************************************************************************************
+    Variables set/reported via command line / BLE interface
+**************************************************************************************************/
+
+uint8_t trigfreq;
+uint8_t pll_gain;
+int16_t ioffset, qoffset;
+uint8_t sync_mode;
+bool manualsweep;
+bool iq_print_enabled;
+//#define SWEEP_INTERVAL_DEFAULT_SEC (10 * 60)
+#define SWEEP_INTERVAL_DEFAULT_SEC (60)
+#define ACTIVE_TIME_DEFAULT_SEC (30)
+static uint16_t sweep_interval_sec;
+static uint16_t active_time_sec;
+static char reportsettings[30];
+// Device name to advertise
+static uint8_t devicename[] = {'O', 'r', 'b', 'i', 'o', '-', 0, 0, 0, 0, 0, 0, 0};
+
+/**************************************************************************************************
+    MAX86171 Variables.
+**************************************************************************************************/
+
+static max86171_t max86171_dev;
+
+/**************************************************************************************************
+    Sweep States Defines and Variables.
+**************************************************************************************************/
+
+#define SWEEP_START_DELAY_MSEC (50)
+typedef enum
+{
+    SWEEP_STATE_INIT = 1,
+    SWEEP_STATE_SWEEP = 2,
+    SWEEP_STATE_END = 3,
+    SWEEP_STATE_NONE = 4,
+} sweep_state_t;
+static sweep_state_t sweepState;
+
+// To keep track of when the sweeps started, to timeout after 30seconds
+static uint32_t blestarttime, starttime;
+static int sweepcount;
+
+/**************************************************************************//**
+ * Periodic activity
+ *****************************************************************************/
+
+typedef enum
+{
+    SIGNAL_SWEEP = 1 << 0,
+    SIGNAL_PPG = 1 << 1,
+    SIGNAL_ACCEL = 1 << 2,
+} app_signal_t;
+
+static sl_sleeptimer_timer_handle_t timer_startsweep;
+static sl_sleeptimer_timer_handle_t timer_readaccel;
+
+static void triggerSweep (void);
+static void triggerReadAccel (void);
+
+// This timer will fire when sleep is over
+// Note: this is called from a timer tick ISR context so needs to be compact
+static void timer_cb_startsweep (sl_sleeptimer_timer_handle_t *handle, void *data)
+{
+    (void)data;
+    (void)handle;
+    triggerSweep ();
+}
+
+// Sends a signal to the event handler to start a sweep
+// Called 1) When timer callback is called when waking from sleep or CLI/BLE command to start a sweep
+//        2) When handleNewPacket either send a sweep in a single packet or connection is not open
+//        3) When app_process_action calls sendNextChunk and the whole sweep has been sent or too many errors
+static void triggerSweep (void)
+{
+    // Trigger sweep activity, making sure to retry if the signal did not work due to resource issue
+    if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
+    {
+        // Start timer to trigger sweeps after a delay
+        sl_sleeptimer_stop_timer (&timer_startsweep);
+        sl_sleeptimer_start_timer_ms (&timer_startsweep, 10, timer_cb_startsweep, NULL, 0, 0);
+    }
+}
+
+// This timer will fire when sleep is over
+// Note: this is called from a timer tick ISR context so needs to be compact
+static void timer_cb_readaccel (sl_sleeptimer_timer_handle_t *handle, void *data)
+{
+    (void)data;
+    (void)handle;
+    triggerReadAccel ();
+}
+
+static void triggerReadAccel (void)
+{
+    // Trigger periodic Accel read, making sure to retry if the signal did not work due to resource issue
+    if (sl_bt_external_signal (SIGNAL_ACCEL) != SL_STATUS_OK)
+    {
+        // Start timer to trigger sweeps after a delay
+        sl_sleeptimer_stop_timer (&timer_readaccel);
+        sl_sleeptimer_start_timer_ms (&timer_readaccel, 10, timer_cb_readaccel, NULL, 0, 0);
+    }
+}
+
+/**************************************************************************//**
+ * GPIO Interrupts
+ *****************************************************************************/
+
+// Unused as of now
+static void AccelInterrupt (uint8_t pin)
+{
+    (void)pin;
+    PRINT_DEBUG ("Accel interrupt!\n\r");
+    return;
+}
+
+#ifdef USE_PPG
+
+// this interrupt handler is used to trigger read_ppg_fifo() via a signal
+static void PPGInterrupt (uint8_t pin)
+{
+    (void)pin;
+    PRINT_DEBUG ("PPG interrupt!\n\r");
+    if (sl_bt_external_signal (SIGNAL_PPG) != SL_STATUS_OK)
+    {
+        // Print failure but do not retry in case this gets into a loop
+        PRINT_ERROR ("ERROR: Signal from PPG interrupt failed!\n\r");
+    }
+    return;
+}
+
+#endif
+
+/**************************************************************************************************
+    EN_POWER/HFXO related utility functions to switch on/off
+**************************************************************************************************/
+
+// Switch on only if off 
+static uint8_t hfxo_enable_bits;
+
+// This is called from sl_platform_init before sl_clock_manager_init as HFXO will be initialised there
+// and needs EN_POWER to be powered up.
+// This is done so that all the drivers will be set based on PCLK which is based on SYSCLK = HFXO
+// Setting drivers based on HFRCODPLL will need them to be re-initialised later each time in wake
+void my_en_power_init (void)
+{
+    // Make sure GPIOs are enabled
+    CMU_ClockEnable(cmuClock_GPIO, true);
+    // Powerup PLLs, Downconvertor, Attenuator
+    GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 1);
+}
+
+// EN_POWER disable
+// This is to be called after stopping Bluetooth or before going to sleep.
+static void switch_off_en_power_hfxo (app_module_t x)
+{
+    // Clear the module which no longer needs EN_POWER/HFXO
+    hfxo_enable_bits &= ~x;
+    if (hfxo_enable_bits == 0)
+    {
+        sl_status_t sc;
+        // Switch back to HFRCO (e.g., when Bluetooth radio is idle)
+        sc = sli_clock_manager_hal_set_sysclk_source (SL_OSCILLATOR_HFRCODPLL);
+        app_assert_status(sc);
+        // Wait a while for HFRCO to settle
+        sl_sleeptimer_delay_millisecond (10);
+        // And then remove power from PLLs, Downconvertor, TCXO
+        GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 0);
+    }
+}
+
+// EN_POWER enable
+// This is to be called before starting Bluetooth and after wake from
+// sleep for any measurement as the SPI bus initialisations were done when HFXO
+// was active.
+static void switch_on_en_power_hfxo (app_module_t x)
+{
+    // Only enable if not enabled already
+    if (hfxo_enable_bits == 0)
+    {
+        sl_status_t sc;
+        // First powerup PLLs, Downconvertor, TCXO
+        GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 1);
+        // Wait a while for power to various ICs to settle
+        sl_sleeptimer_delay_millisecond (10);
+        // And then switch to HFXO (e.g., before/at start of Bluetooth radio activity)
+        sc = sli_clock_manager_hal_set_sysclk_source (SL_OSCILLATOR_HFXO);
+        app_assert_status(sc);
+    }
+    hfxo_enable_bits |= x;
+}
+
+#ifdef USE_BLE
+
+/**************************************************************************************************
+    BLE data transfer variables.
+**************************************************************************************************/
+
+// Note: right now we only use Notifications so the following two flags are set/cleared at the same
+// times. However they are retained just in case Indications are added later, in which case
+// transferEnabled will be the common flag and sendNotification will say whether Not or Ind is used.
+static bool transferEnabled, sendNotification;
+static int bytesRemaining, sendTotalDataLen;
+static uint8_t *sendData;
+#define MAX_PACKET_LEN (240)
+
+#ifdef STORE_SWEEPS
+bool getTransferEnabled (void)
+{
+    return transferEnabled;
+}
+#endif
+
+/**************************************************************************************************
+    BLE Variables.
+**************************************************************************************************/
+
+#define ADVERTISING_INTERVAL_MS 2000
+// The advertising set handle allocated from Bluetooth stack.
+static uint8_t advertising_set_handle;
+// To save connection handle
+static int OpenedConnectionHandle;
+
+/**************************************************************************//**
+ * Utility function for creating unique advertising name
+ *****************************************************************************/
+
+static uint8_t nibble_to_hex (uint8_t x)
+{
+    if (x <= 9)
+        x += '0';
+    else if ((x >= 10) && (x <= 15))
+        x += ('A' - 10);
+    else
+        x = '?';
+    return x;
+}
+
+/**************************************************************************************************
+    Functions to set parameters for BLE advertising
+**************************************************************************************************/
+
+// Add 6 characters of unique ID to advertised name (from 3 bytes)
+#define UNIQUE_NAME_LEN (6)
+#define UNIQUE_NAME_LEN_OFFSET (6)
+#define NIBBLE_LEN (4)
+
+static void setupDeviceName (void)
+{
+    sl_status_t sc;
+    uint32_t unit_id;
+    bd_addr address;
+    uint8_t address_type;
+    // Extract unique ID from BT Address.
+    sc = sl_bt_system_get_identity_address(&address, &address_type);
+    app_assert_status(sc);
+    // Form unique System ID.
+    unit_id = (address.addr[2] << 16) | (address.addr[1] << 8) | address.addr[0];
+    for (int i = 0; i < UNIQUE_NAME_LEN; i++)
+    {
+        uint8_t x = (unit_id >> (NIBBLE_LEN * (UNIQUE_NAME_LEN - 1 - i))) & 0xF;
+        devicename[UNIQUE_NAME_LEN_OFFSET + i] = nibble_to_hex (x);
+    }
+    sc = sl_bt_gatt_server_write_attribute_value(gattdb_device_name, UNIQUE_NAME_LEN_OFFSET, UNIQUE_NAME_LEN, &devicename[UNIQUE_NAME_LEN_OFFSET]);
+    app_assert_status(sc);
+    PRINT_INFO ("Device ID %s\n\r", devicename);
+}
+
+static void setupAdvertising (void)
+{
+    sl_status_t sc;
+
+    // Set TX power to 0dBm
+    sl_bt_system_set_tx_power(0, 0, NULL, NULL);
+
+    // Create an advertising set.
+    sc = sl_bt_advertiser_create_set(&advertising_set_handle);
+    app_assert_status(sc);
+
+    // Generate data for advertising
+    sc = sl_bt_legacy_advertiser_generate_data(advertising_set_handle, sl_bt_advertiser_general_discoverable);
+    app_assert_status(sc);
+
+    // Set advertising interval
+    sc = sl_bt_advertiser_set_timing(
+        advertising_set_handle,
+        ADVERTISING_INTERVAL_MS * 1.6, // min. adv. interval (milliseconds * 1.6)
+        ADVERTISING_INTERVAL_MS * 1.6, // max. adv. interval (milliseconds * 1.6)
+        0,   // adv. duration
+        0);  // max. num. adv. events
+    app_assert_status(sc);
+
+    // Minimum & Maximum connection interval = 7.5msec (6 * 1.25)
+    // Slave latency (how many connection intervals the slave can skip if it has no data to send) = 0 (default)
+    // Supervision timeout (time that the connection is maintained although the devices can't communicate at the currently configured connection intervals) = 1000msec (100 * 10)
+    sl_bt_connection_set_default_parameters (6, 6, 0, 100, 0, 0xffff);
+    // Set maximum possible MTU & PDU sizes for best throughput
+    uint16_t val16;
+    sl_bt_gatt_server_set_max_mtu (250, &val16);
+    sl_bt_connection_set_default_data_length (251);
+}
+
+static void startAdvertising (void)
+{
+    sl_status_t sc;
+
+    // Check if EN_POWER and HFXO have to be switched on before starting BLE activity
+    switch_on_en_power_hfxo (ACTIVE_MODULE_BLE);
+
+    // Start advertising and enable connections.
+    sc = sl_bt_legacy_advertiser_start(advertising_set_handle, sl_bt_legacy_advertiser_connectable);
+    app_assert_status(sc);
+    PRINT_INFO ("startAdvertising\n\r");
+}
+
+#ifndef BLE_KEEP_ALIVE
+
+// Called when connection is closed as the stack automatically
+// restarts advertising. This is only if BLE doesn't need
+// to be kept alive.
+// If the connection was closed by the client or due to
+// bad link, advertising will remain off till the next wake.
+static void stopAdvertising (void)
+{
+    sl_status_t sc;
+
+    // Stop advertising. Returns SL_STATUS_OK if already closed as well
+    sc = sl_bt_advertiser_stop(advertising_set_handle);
+    app_assert_status(sc);
+    PRINT_INFO ("stopAdvertising\n\r");
+
+    // Check if EN_POWER and HFXO have to be switched off
+    switch_off_en_power_hfxo (ACTIVE_MODULE_BLE);
+}
+
+#endif
+
+// Called from setLowPowerMode and from sl_bt_evt_connection_closed_id
+// if still in WAKE, as there is no point doing the sample collection
+// if there is no open BLE connection to send the samples through
+static void closeConnection (void)
+{
+    // Close connection only if open
+    if (OpenedConnectionHandle != SL_BT_INVALID_CONNECTION_HANDLE)
+    {
+        sl_bt_connection_close(OpenedConnectionHandle);
+        PRINT_INFO ("closeConnection\n\r");
+    }
+#ifndef BLE_KEEP_ALIVE
+    // If connection already closed then stop advertising here
+    // else close it after closed event happens
+    else
+        stopAdvertising ();
+#endif
+}
+
+/**************************************************************************//**
+ * Checks if there is data sending to be initiated
+ *****************************************************************************/
+static bool notificationTransferInProgress (void)
+{
+  bool ret = false;
+  if(transferEnabled && sendNotification && bytesRemaining)
+      ret = true;
+  return ret;
+}
+
+/**************************************************************************//**
+ * Checks if it is ok to sleep now
+ *****************************************************************************/
+bool app_is_ok_to_sleep(void)
+{
+  bool ret = true;
+  if(notificationTransferInProgress() == true)
+  {
+      ret = false;
+  }
+  return ret;
+}
+
+/**************************************************************************//**
+ * Routine for power manager handler
+ *****************************************************************************/
+sl_power_manager_on_isr_exit_t app_sleep_on_isr_exit(void)
+{
+  sl_power_manager_on_isr_exit_t ret = SL_POWER_MANAGER_IGNORE;
+  if(notificationTransferInProgress() == true)
+  {
+      ret = SL_POWER_MANAGER_WAKEUP;
+  }
+  return ret;
+}
+
+/**************************************************************************//**
+ * Routines to send BLE packets in chunks
+ *****************************************************************************/
+#define DATAPRINTF(...)
+#undef PRINT_PACKET_TIMES
+#ifdef PRINT_PACKET_TIMES
+static uint64_t time_now = 0;
+#endif
+
+#define MAX_RETRY_COUNT (20)
+#define RETRY_BACKOFF_TIME_MSEC (5)
+static int sendchunkretrycount;
+static uint32_t errtime;
+
+// Send a chunk of data and update remaining bytes to send if successful
+// Return false if partial packet i.e. chunk was successfully sent or packet could not be sent
+// Return true if packet was fully sent in a single chunk, or reached maximum unsuccessful retries
+// This overload of a bool variable is knowingly done and considered okay for now.
+static bool sendChunk (void)
+{
+    bool ret = false;
+    sl_status_t status;
+    uint32_t nowtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+    // No point trying immediately after resources error, wait a while
+    if ((errtime) && ((nowtime - errtime) < RETRY_BACKOFF_TIME_MSEC))
+            return false;
+    // Check packet size for safety
+    int pktlen = MAX_PACKET_LEN;
+    if (bytesRemaining < pktlen) pktlen = bytesRemaining;
+    // Should not happen
+    if (pktlen == 0) return true;
+    // Send upto 240 bytes in a packet as per BLE spec
+    status = sl_bt_gatt_server_send_notification(OpenedConnectionHandle, gattdb_sweepdata, pktlen, &sendData[sendTotalDataLen - bytesRemaining]);
+    if (status != SL_STATUS_OK)
+    {
+        // Keep a count of retries so that we are not stuck in this state forever, which prevents MCU from sleeping and stalls
+        // data transfer till the next time handleNewPacket is called. So just drop the current data and continue.
+        // Distinguish between different types of error codes: SL_STATUS_NO_MORE_RESOURCE, INVALID_HANDLE, NOT_CONNECTED, ...
+        // No point retrying for anything but the first error type.
+        if (status == SL_STATUS_NO_MORE_RESOURCE)
+        {
+            if (++sendchunkretrycount >= MAX_RETRY_COUNT)
+            {
+                sendchunkretrycount = 0;
+                bytesRemaining = 0;
+                ret = true;
+                errtime = 0;
+                PRINT_ERROR ("ERROR: sendChunk retry count for error 0x%lx limit reached, drop chunk and continue!\n\r", status);
+            }
+            errtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+        }
+        else
+        {
+            sendchunkretrycount = 0;
+            bytesRemaining = 0;
+            ret = true;
+            errtime = 0;
+            PRINT_ERROR ("ERROR: sendChunk error 0x%lx, no need to retry, drop chunk and continue!\n\r", status);
+        }
+#ifdef PRINT_PACKET_TIMES
+        uint64_t new_time_now;
+        sl_sleeptimer_tick64_to_ms (sl_sleeptimer_get_tick_count64 (), &new_time_now);
+        PRINT_ERROR ("ERR:%ld\n\r", (uint32_t)(new_time_now - time_now));
+        time_now = new_time_now;
+#endif
+    }
+    else
+    {
+        DATAPRINTF ("Success in sendChunk size %d\n\r", pktlen);
+        bytesRemaining -= pktlen;
+        // Reset retry count on success
+        sendchunkretrycount = 0;
+        errtime = 0;
+#ifdef PRINT_PACKET_TIMES
+        uint64_t new_time_now;
+        sl_sleeptimer_tick64_to_ms (sl_sleeptimer_get_tick_count64 (), &new_time_now);
+        PRINT_INFO ("OK:%ld\n\r", (uint32_t)(new_time_now - time_now));
+        time_now = new_time_now;
+#endif
+        // All data sent, trigger next sweep
+        if (bytesRemaining == 0)
+        {
+#ifdef PRINT_PACKET_TIMES
+            uint64_t new_time_now;
+            sl_sleeptimer_tick64_to_ms (sl_sleeptimer_get_tick_count64 (), &new_time_now);
+            PRINT_INFO ("PKT:%ld\n\r", (uint32_t)(new_time_now - time_now));
+            time_now = new_time_now;
+#endif
+            PRINT_INFO ("All chunks sent\n\r");
+            ret = true;
+        }
+    }
+    return ret;
+}
+
+// Will be called in app_process_action to send the next pending chunk
+// and also acts as a retry mechanism
+static void sendNextChunk (void)
+{
+    // To keep transferring pending packets via notifications
+    if(notificationTransferInProgress() == true)
+    {
+        bool ret = sendChunk ();
+        // Trigger next sweep as data was fully sent or failure
+        // was retried enough times
+        if ((ret == true) && (active_module == ACTIVE_MODULE_SWEEP))
+            triggerSweep ();
+    }
+}
+
+#define HEADER_SIZE (10) // 3 byte syncword, 1 byte packet type, 4 bytes timestamp, 2 byte byte count
+// Sweep data is the largest out of Sweep/PPG/Accel so set array size based on it
+static uint8_t resultArraySend[HEADER_SIZE + sizeof(int16_t) * RESULT_SIZE * NUM_INPUTS];
+
+// Call this when a new packet is ready to send e.g. when one sweep of data is
+// collected, or PPG has collected one frame of measurements.
+// Note: resultArraySend, bytesRemaining etc. will get overwritten if the contents
+// of the previous call were not sent out yet. This is known and considered desirable
+// as we have no way of buffering up older unsent data indefinitely.
+static bool handleNewPacket (app_module_t source, uint8_t *dataSource, int dataSourceLen)
+{
+    // True if packet was fully sent or connection not opened
+    // False if packet partially sent or send failure which needs retry
+    bool ret = true;
+    if (!dataSource || (dataSourceLen > ((int)sizeof(resultArraySend) - HEADER_SIZE)))
+    {
+        PRINT_ERROR ("ERROR: handleNewPacket source address %p or source length %d\n\r", dataSource, dataSourceLen);
+    }
+    // Send data if transfer is enabled
+    else if ((transferEnabled == true) && (sendNotification == true))
+    {
+        // At the start of a sweep send a syncword, packet type and timestamp
+        resultArraySend[0] = 0xAA;
+        resultArraySend[1] = 0xBB;
+        resultArraySend[2] = 0xCC;
+        // Insert packet type
+        resultArraySend[3] = __builtin_ctz(source);
+        // Insert timestamp
+        uint32_t nowtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+        for (size_t k = 0; k < sizeof(uint32_t); k++)
+            resultArraySend[4 + k] = (nowtime >> (24 - k * 8)) & 0xFF;
+        // Insert packet byte count (not including fixed header size)
+        resultArraySend[8] = (dataSourceLen >> 8) & 0xFF;
+        resultArraySend[9] = dataSourceLen & 0xFF;
+        // As dataSource will come into use when adding a new packet, make a local copy for TX
+        memcpy (resultArraySend + HEADER_SIZE, dataSource, dataSourceLen);
+        sendData = resultArraySend;
+        sendTotalDataLen = HEADER_SIZE + dataSourceLen;
+        bytesRemaining = sendTotalDataLen;
+        sendchunkretrycount = 0;
+        errtime = 0;
+        ret = sendChunk ();
+    }
+    return ret;
+}
+
+#endif
+
+/**************************************************************************//**
+ * Low Power Mode related
+ *****************************************************************************/
+
+static void shutoffRFICs (void)
+{
+    // Make sure the downconvertor is disabled
+    resetCMX994 ();
+    // Make sure the PLLs is disabled
+    powerdownLMX2572LP ();
+}
+
+// Helper function to enable UART pins
+static void enable_UART_pins (void)
+{
+#ifndef CLI_KEEP_ALIVE
+    // Re-enable UART pins
+    GPIO_PinModeSet(USART0_TX_PORT, USART0_TX_PIN, gpioModePushPull, 1);
+    GPIO_PinModeSet(USART0_RX_PORT, USART0_RX_PIN, gpioModeInputPull, 1);
+#endif
+}
+
+// Helper function to disable UART pins before sleep
+static void disable_UART_pins (void)
+{
+#ifndef CLI_KEEP_ALIVE
+    // Disable UART pins
+    GPIO_PinModeSet(USART0_TX_PORT, USART0_TX_PIN, gpioModeDisabled, 0);
+    GPIO_PinModeSet(USART0_RX_PORT, USART0_RX_PIN, gpioModeDisabled, 0);
+#endif
+}
+
+// Helper function to enable all SPI & CS pins before the first SPI operations
+static void enable_SPI_pins (void)
+{
+    // Re-enable SPI pins
+    // Note that there is no SPI activity in interrupts, and the signal
+    // event handlers run to completion, so even if multiple modes are active
+    // at the same time, there is no SPI bus clash. At the moment, only a
+    // single mode is kept active.
+    // Note also that LIS2DH12, CMX994, LMX2572LP all use Big Endian mode
+    GPIO_PinModeSet(USART1_CLK_PORT, USART1_CLK_PIN, gpioModePushPull, 0);
+    GPIO_PinModeSet(USART1_RX_PORT, USART1_RX_PIN, gpioModeInput, 0);
+    GPIO_PinModeSet(USART1_TX_PORT, USART1_TX_PIN, gpioModePushPull, 0);
+    // Enable all CS pins
+    GPIO_PinModeSet(CS_CMX994_PORT, CS_CMX994_PIN, gpioModePushPull, 1);
+    GPIO_PinModeSet(CS_LO_PORT, CS_LO_PIN, gpioModePushPull, 1);
+    GPIO_PinModeSet(CS_ACCEL_PORT, CS_ACCEL_PIN, gpioModePushPull, 1);
+#ifdef USE_PPG
+    GPIO_PinModeSet(CS_OPT_PORT, CS_OPT_PIN, gpioModePushPull, 1);
+#endif
+}
+
+// Helper function to disable all SPI & CS pins before sleep
+static void disable_SPI_pins (void)
+{
+    // Disable SPI pins
+    GPIO_PinModeSet(USART1_CLK_PORT, USART1_CLK_PIN, gpioModeDisabled, 0);
+    GPIO_PinModeSet(USART1_TX_PORT, USART1_TX_PIN, gpioModeDisabled, 0);
+    GPIO_PinModeSet(USART1_RX_PORT, USART1_RX_PIN, gpioModeDisabled, 0);
+    // Disable all CS pins
+    GPIO_PinModeSet(CS_CMX994_PORT, CS_CMX994_PIN, gpioModeDisabled, 0);
+    GPIO_PinModeSet(CS_LO_PORT, CS_LO_PIN, gpioModeDisabled, 0);
+    GPIO_PinModeSet(CS_ACCEL_PORT, CS_ACCEL_PIN, gpioModeDisabled, 0);
+#ifdef USE_PPG
+    GPIO_PinModeSet(CS_OPT_PORT, CS_OPT_PIN, gpioModeDisabled, 0);
+#endif
+}
+
+// Board_init / BOARD_uninit enable/disable all GPIO & Port pins
+static void BOARD_pins_init(void)
+{
+    // Re-enable SPI & UART pins
+    enable_UART_pins ();
+    enable_SPI_pins ();
+    // Enable MUXOUT input
+    GPIO_PinModeSet(LO_PLL_MUX_PORT, LO_PLL_MUX_PIN, gpioModeInput, 0);
+    // For timing measurement
+    GPIO_PinModeSet(TP1_PORT, TP1_PIN, gpioModePushPull, 1);
+    GPIO_PinModeSet(RAMP_DIR_PORT, RAMP_DIR_PIN, gpioModePushPull, 0);
+}
+
+static void BOARD_pins_uninit (void)
+{
+    // Disable UART & SPI pins
+    disable_UART_pins ();
+    disable_SPI_pins ();
+    // Disable MUXOUT input
+    GPIO_PinModeSet(LO_PLL_MUX_PORT, LO_PLL_MUX_PIN, gpioModeDisabled, 0);
+    // For timing measurement
+    GPIO_PinModeSet(TP1_PORT, TP1_PIN, gpioModeDisabled, 0);
+    GPIO_PinModeSet(RAMP_DIR_PORT, RAMP_DIR_PIN, gpioModeDisabled, 0);
+}
+
+// Used in case of opening BLE connection when in sleep state when I2C pins are disabled
+static void enableI2CLED (void)
+{
+    // Re-enable I2C pins
+    GPIO_PinModeSet(I2C0_SCL_PORT, I2C0_SCL_PIN, gpioModeWiredAndPullUp, 1);
+    GPIO_PinModeSet(I2C0_SDA_PORT, I2C0_SDA_PIN, gpioModeWiredAndPullUp, 1);
+    // Set LED IC to operational mode and switch LEDs off
+    setLedNormal ();
+    setLed (LED_1, COLOUR_NONE);
+}
+
+// Used in case of closing BLE connection when in sleep state when I2C pins are disabled
+// and normal low power mode
+static void disableI2CLED (void)
+{
+    // Switch off LEDs
+    setLed (LED_1, COLOUR_NONE);
+    setLedShutdown ();
+    // Disable I2C pins
+    GPIO_PinModeSet(I2C0_SCL_PORT, I2C0_SCL_PIN, gpioModeDisabled, 0);
+    GPIO_PinModeSet(I2C0_SDA_PORT, I2C0_SDA_PIN, gpioModeDisabled, 0);
+}
+
+// Called when sweep is started
+static void unsetLowPowerMode (void)
+{
+    sleepState = SLEEP_STATE_WAKE;
+    // Check if EN_POWER and HFXO have to be switched on before starting UART activity
+    switch_on_en_power_hfxo (ACTIVE_MODULE_CLI);
+    // Enable required pins
+    BOARD_pins_init ();
+#ifdef USE_BLE
+    // Connection was already open
+    if (OpenedConnectionHandle != SL_BT_INVALID_CONNECTION_HANDLE)
+    {
+        PRINT_INFO ("BLE connection already open!\n\r");
+    }
+#ifndef BLE_KEEP_ALIVE
+    startAdvertising ();
+#endif
+#endif
+    PRINT_INFO ("Exit LPM\n\r");
+}
+
+// Called when sweep is ended and when BLE connection is closed if not already in sleep
+// Accel is not powered off in case it is needed for wakeup
+static void setLowPowerMode (void)
+{
+    sweepState = SWEEP_STATE_INIT;
+    sleepState = SLEEP_STATE_SLEEP;
+    PRINT_INFO ("Enter LPM\n\r");
+#ifdef USE_BLE
+    // Close the BLE connection if open when sweep is done
+    closeConnection ();
+#endif
+    // Disable PPG1/PPG2 and Shutdown MAX86171
+    max86171_shutdown(&max86171_dev);
+    // Shut off RF ICs
+    shutoffRFICs ();
+    // Disable IADC
+    disableIADC ();
+    // Disable used pins
+    BOARD_pins_uninit ();
+#ifndef CLI_KEEP_ALIVE
+    // Check if EN_POWER and HFXO have to be switched off
+    switch_off_en_power_hfxo (ACTIVE_MODULE_CLI);
+#endif
+}
+
+// Setup Accel and PPG interrupts
+static void setup_interrupts (void)
+{
+    // GPIO input used as Accelerometer interrupt
+    GPIO_PinModeSet(INT_ACCEL_PORT, INT_ACCEL_PIN, gpioModeInput, 0);
+    // Setup the interrupt handlers
+    GPIOINT_CallbackRegister(INT_ACCEL_PIN, (GPIOINT_IrqCallbackPtr_t)AccelInterrupt);
+    // Setup the interrupt on falling edge
+    GPIO_ExtIntConfig(INT_ACCEL_PORT, INT_ACCEL_PIN, INT_ACCEL_PIN, false, true, true);
+
+#ifdef USE_PPG
+    // GPIO input used as PPG interrupt
+    GPIO_PinModeSet(INT_OPT_PORT, INT_OPT_PIN, gpioModeInput, 0);
+    // Setup the interrupt handlers
+    GPIOINT_CallbackRegister(INT_OPT_PIN, (GPIOINT_IrqCallbackPtr_t)PPGInterrupt);
+    // Setup the interrupt on falling edge
+    GPIO_ExtIntConfig(INT_OPT_PORT, INT_OPT_PIN, INT_OPT_PIN, false, true, true);
+#endif
+    GPIOINT_Init();
+}
+
+#ifdef USE_PPG
+
+/**************************************************************************//**
+ * PPG functions
+ *****************************************************************************/
+
+static bool ppg_init_done;
+static uint8_t fifo_buf[MAX_FIFO_SAMPLES * 3];
+static uint16_t samplecount;
+static bool tag1found;
+static ppg_agc_t g_agc;
+static max86171_irq_status_t irq;
+static void dostopppg (void);
+
+// Called when PPG is started
+static void start_ppg (void)
+{
+    int ret;
+    // Put pins in operational mode
+    enable_UART_pins ();
+    enable_SPI_pins ();
+    // Soft reset
+    ret = max86171_soft_reset(&max86171_dev);
+    PRINT_INIT ("max86171_soft_reset returned %d\n\r", ret);
+    // Write the base config registers
+    // Write the registers for each MEASn enabled
+    // Write SYS_CFG2 and SYS_CFG1
+    ret = max86171_load_config_from_table(&max86171_dev, MAX86171_MEAS_ALL);
+    PRINT_INIT ("max86171_load_config_from_table returned %d\n\r", ret);
+    // Clear the FIFO to start afresh
+    ret = max86171_fifo_flush(&max86171_dev);
+    if (ret)
+    {
+        PRINT_ERROR ("ERROR: max86171 FIFO flush failed at startup\n\r");
+    }
+    // Last tag is unknown to begin with
+    tag1found = false;
+
+    // Verify MAX86171 power ready before proceeding
+    int count = 10;
+    while (1)
+    {
+        // Read and clear all status bits
+        ret = max86171_irq_read_clear(&max86171_dev, &irq);
+        if (ret)
+        {
+            count--;
+            if (count == 0)
+            {
+                PRINT_ERROR ("ERROR: max86171 PWR_RDY failed at startup, stop PPG\n\r");
+                max86171_verify_config(&max86171_dev, MAX86171_MEAS_ALL, NULL, 0, NULL);
+                dostopppg ();
+                return;
+            }
+            else
+            {
+                PRINT_ERROR ("ERROR: max86171 PWR_RDY failed at startup, wait and retry\n\r");
+                sl_sleeptimer_delay_millisecond (50);
+            }
+        }
+        else
+        {
+            PRINT_ERROR ("max86171 PWR_RDY is good\n\r");
+            break;
+        }
+    }
+    ppg_agc_init(&g_agc);
+    ppg_init_done = true;
+    // Disable pins after use
+    disable_UART_pins ();
+    disable_SPI_pins ();
+}
+
+// Called when PPG is to be stopped
+static void stop_ppg (void)
+{
+    // Put pins in operational mode
+    enable_UART_pins ();
+    enable_SPI_pins ();
+    // Disable PPG1/PPG2 and Shutdown MAX86171
+    max86171_shutdown(&max86171_dev);
+    ppg_init_done = false;
+    // Disable pins after use
+    disable_UART_pins ();
+    disable_SPI_pins ();
+}
+
+// To be called when PPG interrupt is triggered periodically
+// As we have kept the FIFO interrupt level as MAX_FIFO_SAMPLES
+// which is 180 i.e. 10 frames, this interrupt should happen
+// every 100 msec.
+static bool read_ppg_fifo (void)
+{
+    int ret1, ret2, ret3;
+    /* ── Clear INT pin by reading status registers ── */
+    uint8_t status1, status2, status3;
+    ret1 = max86171_read_reg(&max86171_dev, MAX86171_REG_STATUS1, &status1, 1);
+    ret2 = max86171_read_reg(&max86171_dev, MAX86171_REG_STATUS2, &status2, 1);
+    ret3 = max86171_read_reg(&max86171_dev, MAX86171_REG_STATUS3, &status3, 1);
+    if (ret1 || ret2 || ret3)
+    {
+        // For now print the status clear read errors and return. If there was a
+        // read error the statuses will not clear and this could lead to an
+        // interrupt blockage.
+        PRINT_ERROR ("ERROR: max86171 status read 1: 0x%02x, 2: 0x%02x, 3: 0x%02x\n\r", ret1, ret2, ret3);
+        return false;
+    }
+    else
+    {
+        PRINT_DEBUG ("max86171 status 1: 0x%02x, 2: 0x%02x, 3: 0x%02x\n\r", status1, status2, status3);
+    }
+
+    uint8_t cnt1, cnt2;
+    ret1 = max86171_read_reg(&max86171_dev, MAX86171_REG_FIFO_COUNTER1, &cnt1, 1);
+    ret2 = max86171_read_reg(&max86171_dev, MAX86171_REG_FIFO_COUNTER2, &cnt2, 1);
+    if (ret1 || ret2)
+    {
+        PRINT_ERROR ("ERROR: max86171 counter read 1: 0x%02x, 2: 0x%02x\n\r", ret1, ret2);
+        return false;
+    }
+    // Check for FIFO overflow
+    if (cnt1 & 0x7F)
+    {
+        PRINT_DEBUG ("max86171 FIFO overflow count: 0x%02x\n\r", cnt1 & 0x7F);
+        // Clear the FIFO to clear overflow
+        int ret = max86171_fifo_flush(&max86171_dev);
+        if (ret)
+        {
+            PRINT_ERROR ("ERROR: max86171 FIFO flush failed after overflow\n\r");
+        }
+        // Last tag is unknown to begin with
+        tag1found = false;
+        return false;
+    }
+
+    // Append MSB of upper byte to the lower byte
+    // Bugfix: the formation of the samplecount was corrected here
+    // max86171_fifo_read_samples had the correct method
+    // entry was created after interrupt was triggered
+    samplecount = (uint16_t)((cnt1 & 0x80u) << 1) | cnt2;
+    PRINT_DEBUG ("samplecount = %d\n\r", samplecount);
+
+    // Safety clamp to max size of the FIFO as per A_FULL interrupt size
+    if (samplecount > MAX_FIFO_SAMPLES) samplecount = MAX_FIFO_SAMPLES;
+    // Ensure an even number of samples (PPG1 + PPG2 pair)
+    samplecount = (samplecount / 2) * 2;
+    // Call with the samplecount * 3 bytes per sample
+    // Bugfix: +2 for the SPI command + type is added inside so it's not done here
+    // A FIFO entry is one sample (PPG1 or PPG2)
+    ret1 = max86171_read_FIFO(&max86171_dev, fifo_buf, (size_t)samplecount * 3u);
+    if (ret1)
+    {
+        PRINT_ERROR ("ERROR: max86171 FIFO read: %0x\n\r", ret1);
+        return false;
+    }
+    return true;
+}
+
+// PPG will have 3 bytes per measurement, 8 measurements, 10 frames
+// collected at a time, which we can send as a BLE packet of 240 Bytes.
+// As frame rate is set as 100 Hz, the required BLE transfer speed
+// is 24 Bytes every 10 msec i.e. 2400 Bytes per second or 19.2 kbps
+static uint8_t resultArrayPPG[(MAX86171_NUM_MEAS - 1) * 3 * MAX86171_NUM_FRAMES];
+
+// To be called after PPG FIFO data has been read
+static void parse_ppg_fifo (void)
+{
+    /* ================================================================
+     * Step 7 — inside while(1), after the MAX86171_INT_f block
+     * Parse FIFO.
+     * Frame layout:  tag 1,1, 2,2, 3,3, 4,4, 5,5, 6,6, 7,7, 8,8, 9,9
+     *                (PD1 then PD2 for each MEAS)
+     * We average PD1 & PD2 of MEAS1-8, discard MEAS9 (Ambient).
+     * ================================================================ */
+    /* ── Step 7: parse FIFO → BLE buffer + AGC ─────────────────────── */
+    /* Each pair = PD1(3 bytes) + PD2(3 bytes) = 6 bytes = 2 FIFO samples */
+    uint16_t num_pairs = samplecount / 2u;
+    int resultIndex = 0;
+    for (uint16_t i = 0; i < num_pairs; i++)
+    {
+        uint16_t base = i * 6u;
+
+        uint8_t tag  =  fifo_buf[base] >> 4;
+        uint8_t p1b0 =  fifo_buf[base] & 0x0Fu;
+        uint8_t p1b1 =  fifo_buf[base + 1];
+        uint8_t p1b2 =  fifo_buf[base + 2];
+
+        /* --- PD2 (next 3 bytes, same tag expected) --- */
+        uint8_t tag2 =  fifo_buf[base + 3] >> 4;
+        uint8_t p2b0 =  fifo_buf[base + 3] & 0x0Fu;
+        uint8_t p2b1 =  fifo_buf[base + 4];
+        uint8_t p2b2 =  fifo_buf[base + 5];
+
+        // Handle complex PPG tag errors e.g. not a full frame, tags out of sequence:
+        // Doesn't seem to be required. We can just handle the tags as they come and not
+        // expect any sequencing. The AGC anyway acts on different measurements independently.
+
+        // Handle basic PPG tag errors
+        if (tag < 1u || tag2 != tag || tag > MAX86171_NUM_MEAS)
+        {
+            PRINT_ERROR ("ERROR: in tag %d, %d, %d\n\r", i, tag, tag2);
+            continue;
+        }
+        // Skip the last (ambient) measurement
+        else if (tag == MAX86171_NUM_MEAS)
+        {
+            continue;
+        }
+        // MAX86171 datasheet says to ignore samples till tag = 1 after a restart.
+        else if ((tag1found == false) && (tag != 1))
+        {
+            continue;
+        }
+        else if ((tag1found == false) && (tag == 1))
+        {
+            // tag = 1 has been found so no need to check for it in the future
+            tag1found = true;
+        }
+
+        /* Bugfix: average the two 20-bit values after sign-extension */
+        uint32_t pd1 = ((uint32_t)p1b0 << 16) | ((uint32_t)p1b1 << 8) | p1b2;
+        uint32_t pd2 = ((uint32_t)p2b0 << 16) | ((uint32_t)p2b1 << 8) | p2b2;
+        int32_t avg = (max86171_sext20 (pd1) + max86171_sext20 (pd2)) / 2;
+
+#if 0
+        // Feed samples to the AGC algorithm for each PPG1/PPG2 pair
+        ppg_agc_feed(&g_agc, &max86171_dev, tag - 1u, avg);
+#endif
+
+        // Shouldn't happen due to limiting of samplecount, but add anyway
+        // for local safety.
+        if (resultIndex + 3 > (int)sizeof(resultArrayPPG)) break;
+        // Add back the tag before sending over BLE
+        uint32_t sample_for_ble = (tag << 20) | (avg & ((1L << 20) - 1));
+        resultArrayPPG[resultIndex++] = (sample_for_ble >> 16) & 0xFF;
+        resultArrayPPG[resultIndex++] = (sample_for_ble >> 8) & 0xFF;
+        resultArrayPPG[resultIndex++] = (sample_for_ble >> 0) & 0xFF;
+    }
+#ifdef USE_BLE
+    handleNewPacket (ACTIVE_MODULE_PPG, (uint8_t *)resultArrayPPG, resultIndex);
+#endif
+}
+
+#endif
+
+/**************************************************************************//**
+ * Accel functions
+ *****************************************************************************/
+
+#define NUM_BYTES_PER_ACCEL_SAMPLE (6)
+#ifdef USE_25Hz
+#define NUM_ACCEL_SAMPLES_PER_SEC (25)
+#elif defined(USE_10Hz)
+#define NUM_ACCEL_SAMPLES_PER_SEC (10)
+#elif defined(USE_1Hz)
+#define NUM_ACCEL_SAMPLES_PER_SEC (1)
+#endif
+
+// Have a little space for extra samples in case of timing jitter
+#define NUM_ACCEL_SAMPLES_TO_READ (NUM_ACCEL_SAMPLES_PER_SEC + 2)
+static uint8_t resultArrayAccel[NUM_BYTES_PER_ACCEL_SAMPLE * NUM_ACCEL_SAMPLES_TO_READ];
+
+// Read Accel samples from FIFO
+static int read_accel_fifo (void)
+{
+    // Get number of available Accel X+Y+Z samples
+    int num = accelGetNumData ();
+    // Limit to available storage
+    if (num > NUM_ACCEL_SAMPLES_TO_READ) num = NUM_ACCEL_SAMPLES_TO_READ;
+    // Read Accel FIFO
+    uint8_t *ptr = resultArrayAccel;
+    for (int k = 0; k < num; k++)
+    {
+        // Get one sample of Accel data (X+Y+Z) into BLE buffer
+        accelGetData (ptr);
+#define MAKE_INT16(x,y) ((int16_t)(((uint16_t)y << 8) | x))
+        PRINT_INFO ("%d,%d,%d\n\r", MAKE_INT16(*ptr, *(ptr + 1)), MAKE_INT16(*(ptr + 2), *(ptr + 3)), MAKE_INT16(*(ptr + 4), *(ptr + 5)));
+        ptr += NUM_BYTES_PER_ACCEL_SAMPLE;
+    }
+    return num;
+}
+
+/**************************************************************************//**
+ * Display LED related
+ * Centralised here instead of spread over each module / BLE.
+ * Delinked from low power mode functions.
+ *****************************************************************************/
+
+static uint8_t led_toggle;
+static sl_sleeptimer_timer_handle_t timer_led;
+#define LED_BLIP_TIME_MSEC (100)
+
+// This timer will fire when LED needs to change
+// The LED will be on for a shorter period of time to indicate which module
+// (including BLE if connection is open) is active and off for the remainder of 1 second.
+// The I2C is enabled/disable here and is kept partitioned from the modes as they
+// do not need I2C for any other purpose.
+// Note: this is called from a timer tick ISR context so needs to be compact
+static void timer_cb_led (sl_sleeptimer_timer_handle_t *handle, void *data)
+{
+    (void)data;
+    (void)handle;
+    sl_sleeptimer_stop_timer (&timer_led);
+    // Cycle through LED states: active module, off, BLE (if open), off, active module, ...
+    if (led_toggle == 0)
+    {
+        // In case the timer fires when no module is active
+        if (active_module)
+            setLed (LED_1, moduleLedColours[__builtin_ctz(active_module)]);
+        else
+            setLed (LED_1, COLOUR_NONE);
+        sl_sleeptimer_start_timer_ms (&timer_led, LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 1;
+    }
+    else if (led_toggle == 1)
+    {
+        setLed (LED_1, COLOUR_NONE);
+        sl_sleeptimer_start_timer_ms (&timer_led, 1000 - LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 0;
+#ifdef USE_BLE
+        if (OpenedConnectionHandle != SL_BT_INVALID_CONNECTION_HANDLE)
+            led_toggle = 2;
+#endif
+    }
+    else if (led_toggle == 2)
+    {
+        setLed (LED_1, moduleLedColours[__builtin_ctz(ACTIVE_MODULE_BLE)]);
+        sl_sleeptimer_start_timer_ms (&timer_led, LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 3;
+    }
+    else if (led_toggle == 3)
+    {
+        setLed (LED_1, COLOUR_NONE);
+        sl_sleeptimer_start_timer_ms (&timer_led, 1000 - LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 0;
+    }
+}
+
+// Start LED if not already started
+static void startLedTimer (void)
+{
+    bool is_running = false;
+    sl_sleeptimer_is_timer_running (&timer_led, &is_running);
+    if (is_running == false)
+    {
+        // Enable display LEDs
+        enableI2CLED ();
+        // Start a timer to blip the module LED briefly
+        sl_sleeptimer_stop_timer (&timer_led);
+        sl_sleeptimer_start_timer_ms (&timer_led, LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 0;
+    }
+    return;
+}
+
+// Stop LED if not needed
+static void stopLedTimer (void)
+{
+#ifdef USE_BLE
+    if ((OpenedConnectionHandle == SL_BT_INVALID_CONNECTION_HANDLE) && (active_module == 0))
+#else
+    if (active_module == 0)
+#endif
+    {
+        // Stop the timer
+        sl_sleeptimer_stop_timer (&timer_led);
+        // Disable display LEDs
+        disableI2CLED ();
+    }
+    return;
+}
+
+/**************************************************************************//**
+ * Sweep related
+ *****************************************************************************/
+
+static void run_sweep_statemachine (void)
+{
+    switch (sweepState)
+    {
+        case SWEEP_STATE_INIT:
+        {
+        // To keep track of when the sweeps started, to timeout after 30seconds
+        starttime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+        blestarttime = starttime;
+        sweepcount = 0;
+        // Needed here for when sweep wakes up from sleep, or BLE / CLI command
+        active_module = ACTIVE_MODULE_SWEEP;
+        // Check if EN_POWER and HFXO have to be switched on before starting Sweep activity
+        switch_on_en_power_hfxo (ACTIVE_MODULE_SWEEP);
+        // Set to operating mode
+        unsetLowPowerMode ();
+        // Start LED timer to display Sweep status
+        startLedTimer ();
+        if (manualsweep == true)
+        {
+            PRINT_INFO ("Manual sweep for %d sec ... press SPACE key to advance frequency\n\r", active_time_sec);
+        }
+        else
+        {
+            PRINT_INFO ("Sweep for %d sec ... press any key to break\n\r", active_time_sec);
+        }
+        // Enable downconvertor and IADC
+        resetCMX994 ();
+        enableCMX994 ();
+        setCMX994Offset (ioffset, qoffset);
+        initIADC();
+        sweepState = SWEEP_STATE_SWEEP;
+        // Continue with sweep
+        if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
+        {
+            PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal INIT\n\r");
+        }
+#ifdef STORE_SWEEPS
+        initStoreSweep ();
+#endif
+        }
+        break;
+
+        case SWEEP_STATE_SWEEP:
+        {
+        uint32_t endtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+        if ((endtime - starttime) < (active_time_sec * 1000))
+        {
+            doOneSweep ();
+            sweepcount++;
+            if ((userinput == true) || (active_module == 0))
+            {
+                PRINT_INFO ("User entered a key ... break from sweep\n\r");
+                sweepState = SWEEP_STATE_END;
+                // Finish up sweep
+                if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
+                {
+                    PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal END\n\r");
+                }
+                break;
+            }
+#ifdef USE_BLE
+            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sizeof(resultArray));
+            // Trigger next sweep as data was fully sent in a single packet, or connection is not open
+            if (ret == true)
+                triggerSweep ();
+#else
+            // Continue sweep
+            if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
+            {
+                PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal SWEEP\n\r");
+            }
+#endif
+        }
+        else
+        {
+            sweepState = SWEEP_STATE_END;
+            // Finish up sweep
+            if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
+            {
+                PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal END\n\r");
+            }
+        }
+        }
+        break;
+
+        case SWEEP_STATE_END:
+        {
+        uint32_t bleendtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+        int bletime = (bleendtime - blestarttime) / 1000;
+        (void)bletime;
+        PRINT_INFO ("Finished %d sweeps in %d sec\n\r", sweepcount, bletime);
+        sl_sleeptimer_stop_timer (&timer_startsweep);
+        // Check if Sweep should continue
+        if (active_module == ACTIVE_MODULE_SWEEP)
+        {
+            // Start timer to sleep till next sweep
+            sl_sleeptimer_start_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
+            active_module = 0;
+            PRINT_INFO ("Sleep and set wakeup after %d sec\n\r", sweep_interval_sec);
+        }
+        else
+        {
+            PRINT_INFO ("Sweep has been stopped, so sleep\n\r");
+        }
+        // Stop LED timer for Sweep status
+        stopLedTimer ();
+        // Go to sleep and wait for timer
+        setLowPowerMode ();
+        // Check if EN_POWER and HFXO have to be switched off
+        switch_off_en_power_hfxo (ACTIVE_MODULE_SWEEP);
+        }
+        break;
+
+        default:
+        break;
+    }
+}
+
+/**************************************************************************//**
+ * Common functions for setting parameters from CLI / BLE
+ *****************************************************************************/
+
+static void dosettrigfreq (uint8_t temp)
+{
+    if (temp <= NUM_FREQS)
+    {
+        PRINT_INFO ("Set TP1 trigger frequency to %d\n\r", temp);
+        trigfreq = temp;
+    }
+    else
+    {
+        PRINT_ERROR ("ERROR: invalid argument to set_trigfreq: %d\n\r", temp);
+    }
+}
+
+static void dosetiqoffsets (int temp1, int temp2)
+{
+    if ((abs(temp1) <= CMX994_MAX_OFFSET) && (abs(temp2) <= CMX994_MAX_OFFSET))
+    {
+        PRINT_INFO ("Set Ioffset = %d mV, Qoffset = %d mV\n\r", temp1, temp2);
+        ioffset = temp1;
+        qoffset = temp2;
+    }
+    else
+    {
+        PRINT_ERROR ("ERROR: invalid arguments to set_iq_offsets: %d, %d\n\r", temp1, temp2);
+    }
+}
+
+static void dosetpllgain (uint8_t temp1)
+{
+    if (temp1 <= LMX2572LP_MAX_GAIN)
+    {
+        PRINT_INFO ("Set PLL gain to %d\n\r", temp1);
+        pll_gain = temp1;
+    }
+    else
+    {
+        PRINT_ERROR ("ERROR: invalid argument to set_pll_gain: %d\n\r", temp1);
+    }
+}
+
+static void dosetsweeptiming (int temp1, int temp2)
+{
+    if ((temp1 >= 10) && (temp1 <= 6000) && (temp2 >= 10) && (temp2 <= 6000))
+    {
+        PRINT_INFO ("Set sweep wake time to %d sec, sleep time to %d sec\n\r", temp1, temp2);
+        active_time_sec = temp1;
+        sweep_interval_sec = temp2;
+        // If already in sleep, then update timer to sleep till next sweep
+        // Else, the old setting will still be active and device will not wake as per new setting
+        if (sleepState == SLEEP_STATE_SLEEP)
+        {
+            sl_sleeptimer_restart_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
+            PRINT_INFO ("Update wakeup to after %d sec\n\r", sweep_interval_sec);
+        }
+    }
+    else
+    {
+        PRINT_ERROR ("ERROR: invalid arguments to set_sweep_timing: %d, %d\n\r", temp1, temp2);
+    }
+}
+
+static void dosweep (void)
+{
+    if (active_module)
+    {
+        PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
+        return;
+    }
+    manualsweep = false;
+    sweepState = SWEEP_STATE_INIT;
+    // Start timer to run sweeps after a delay
+    sl_sleeptimer_stop_timer (&timer_startsweep);
+    sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
+}
+
+// Actual stopping will be done inside the Sweep state machine if sweeping.
+// If in sleep state, it is enough to stop the wake timer.
+static void dostopsweep (void)
+{
+    bool is_running = false;
+    sl_sleeptimer_is_timer_running (&timer_startsweep, &is_running);
+    if ((active_module != ACTIVE_MODULE_SWEEP) && (is_running == false))
+    {
+        PRINT_ERROR ("Module %s not active\n\r", getModuleName(ACTIVE_MODULE_SWEEP));
+        return;
+    }
+    // In case sweep was active and in sleep
+    if (is_running == true)
+    {
+        // Stop timer to wake and do sweep
+        sl_sleeptimer_stop_timer (&timer_startsweep);
+    }
+    active_module = 0;
+}
+
+#ifdef USE_PPG
+
+static void dostartppg (void)
+{
+    if (active_module)
+    {
+        PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
+        return;
+    }
+    active_module = ACTIVE_MODULE_PPG;
+    // Check if EN_POWER and HFXO have to be switched on before starting PPG activity
+    switch_on_en_power_hfxo (ACTIVE_MODULE_PPG);
+    // Start LED timer to display PPG status
+    startLedTimer ();
+    // Initialise MAX86171 and set for sample collection
+    start_ppg ();
+}
+
+static void dostopppg (void)
+{
+    if (active_module != ACTIVE_MODULE_PPG)
+    {
+        PRINT_ERROR ("Module %s not active\n\r", getModuleName(ACTIVE_MODULE_PPG));
+        return;
+    }
+    // Put MAX86171 into shutdown and disable PPGs
+    stop_ppg ();
+    active_module = 0;
+    // Stop LED timer for PPG status
+    stopLedTimer ();
+    // Check if EN_POWER and HFXO have to be switched off
+    switch_off_en_power_hfxo (ACTIVE_MODULE_PPG);
+}
+
+#endif
+
+static void dostartaccel (void)
+{
+    if (active_module)
+    {
+        PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
+        return;
+    }
+    active_module = ACTIVE_MODULE_ACCEL;
+    // Start timer to read Accel after 1 second
+    sl_sleeptimer_stop_timer (&timer_readaccel);
+    sl_sleeptimer_start_timer_ms (&timer_readaccel, 1000, timer_cb_readaccel, NULL, 0, 0);
+    // Check if EN_POWER and HFXO have to be switched on before starting Accel activity
+    switch_on_en_power_hfxo (ACTIVE_MODULE_ACCEL);
+    // Start LED timer to display Accel status
+    startLedTimer ();
+    // Put pins in operational mode
+    enable_SPI_pins ();
+    // Start with fresh data
+    accelClearFifo ();
+    // Disable pins after use
+    disable_SPI_pins ();
+}
+
+static void dostopaccel (void)
+{
+    if (active_module != ACTIVE_MODULE_ACCEL)
+    {
+        PRINT_ERROR ("Module %s not active\n\r", getModuleName(ACTIVE_MODULE_ACCEL));
+        return;
+    }
+    // Stop timer to read Accel after 1 second
+    sl_sleeptimer_stop_timer (&timer_readaccel);
+    active_module = 0;
+    // Stop LED timer for Accel status
+    stopLedTimer ();
+    // Check if EN_POWER and HFXO have to be switched off
+    switch_off_en_power_hfxo (ACTIVE_MODULE_ACCEL);
+}
+
+/**************************************************************************//**
+ * Function for extracting parameters from BLE writes. Known issues:
+ * 1) Commands which need fields are not rejected if the fields are not present.
+ * 2) Commands with trailing fields are not rejected.
+ *****************************************************************************/
+
+static void processblesetting (char *payload, int len)
+{
+    // Validate arguments
+    if (!payload || len <= 0) return;
+    int temp0 = 0, temp1 = 0, temp2 = 0;
+    bool temp1_exists = false, temp2_exists = false;
+    // We wont need more than a reasonable sized input
+    char str[8];
+    int i = 0, k = 0;
+
+    i = 0;
+    // Copy the setting
+    while ((k < len) && (payload[k] != ',') && (i < (int)sizeof(str)-1))
+        str[i++] = payload[k++];
+    str[i] = 0;
+    // Reject the case when the end of the local str was reached without a comma
+    if (((i == (int)sizeof(str)-1) && (k < len) && (payload[k] != ',')) || !i)
+    {
+        PRINT_ERROR ("ERROR: Invalid BLE setting payload: field 1\n\r");
+        return;
+    }
+    temp0 = atoi (str);
+    if ((temp0 < 1) || (temp0 > 9))
+    {
+        PRINT_ERROR ("ERROR: Invalid BLE command\n\r");
+        return;
+    }
+
+    // Continue only if there's more input
+    if (k < len)
+    {
+        // Skip the comma
+        k++;
+        i = 0;
+        // Copy the setting
+        while ((k < len) && (payload[k] != ',') && (i < (int)sizeof(str)-1))
+            str[i++] = payload[k++];
+        str[i] = 0;
+        // Reject the case when the end of the local str was reached without a comma
+        if (((i == (int)sizeof(str)-1) && (k < len) && (payload[k] != ',')) || !i)
+        {
+            PRINT_ERROR ("ERROR: Invalid BLE setting payload: field 2\n\r");
+            return;
+        }
+        temp1 = atoi (str);
+        temp1_exists = true;
+
+        // Continue only if there's more input
+        if (k < len)
+        {
+            // Skip the comma
+            k++;
+            i = 0;
+            // Copy the setting
+            while ((k < len) && (payload[k] != ',') && (i < (int)sizeof(str)-1))
+                str[i++] = payload[k++];
+            str[i] = 0;
+            // Reject the case when the end of the local str was reached without a comma
+            if (((i == (int)sizeof(str)-1) && (k < len) && (payload[k] != ',')) || !i)
+            {
+                PRINT_ERROR ("ERROR: Invalid BLE setting payload: field 3\n\r");
+                return;
+            }
+            temp2 = atoi (str);
+            temp2_exists = true;
+        }
+    }
+
+    switch (temp0)
+    {
+        case 1:
+        dosweep ();
+        break;
+
+        case 2:
+        dostopsweep ();
+        break;
+
+        case 3:
+        // Make sure we did receive these fields
+        if ((temp1_exists == true) && (temp2_exists == true))
+            dosetiqoffsets (temp1, temp2);
+        else
+        {
+            PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
+        }
+        break;
+
+        case 4:
+        // Make sure we did receive these fields
+        if ((temp1_exists == true) && (temp2_exists == true))
+            dosetsweeptiming (temp1, temp2);
+        else
+        {
+            PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
+        }
+        break;
+
+        case 5:
+        // Make sure we did receive the field
+        if (temp1_exists == true)
+            dosettrigfreq (temp1);
+        else
+        {
+            PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
+        }
+        break;
+
+        case 6:
+        // Make sure we did receive the field
+        if (temp1_exists == true)
+            dosetpllgain (temp1);
+        else
+        {
+            PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
+        }
+        break;
+
+#ifdef USE_PPG
+        case 7:
+        dostartppg ();
+        break;
+
+        case 8:
+        dostopppg ();
+        break;
+#endif
+
+        case 9:
+        dostartaccel ();
+        break;
+
+        case 10:
+        dostopaccel ();
+        break;
+
+        default:
+        PRINT_ERROR ("ERROR: Invalid control command %d\n\r", temp0);
+        break;
+    }
+}
+
+/**************************************************************************//**
+ * Application Init.
+ *****************************************************************************/
+SL_WEAK void app_init(void)
+{
+    PRINT_INIT ("Orbio Sensor version %d starting up ...\n\r", VERSION);
+    enable_SPI_pins ();
+    // Keep Accel always on for now, later put into low power mode in sleep if needed
+    PRINT_INIT ("accelInit returned %d\n\r", accelInit ());
+    PRINT_INIT ("KTD2052A ID = 0x%02x, expected 0x%02x\n\r", getLedID (), REG_ID_VAL);
+    PRINT_INIT ("max86171_init returned %d\n\r", max86171_init(&max86171_dev));
+    // Initialise CLI command table
+    cli_custom_cmd_init();
+    // Set default value for PPG init variable
+    ppg_init_done = false;
+    // Set default values for variables set by command line
+    trigfreq = 0;
+    pll_gain = 8;
+    ioffset = 0;
+    qoffset = 0;
+    sync_mode = 0;
+    manualsweep = false;
+    sweep_interval_sec = SWEEP_INTERVAL_DEFAULT_SEC;
+    active_time_sec = ACTIVE_TIME_DEFAULT_SEC;
+    sweepState = SWEEP_STATE_INIT;
+    sleepState = SLEEP_STATE_WAKE;
+    // Hack initialisation but it works
+    hfxo_enable_bits = ACTIVE_MODULE_BLE | ACTIVE_MODULE_CLI;
+    active_module = ACTIVE_MODULE_NONE;
+    // Setup Accel and PPG interrupts
+    setup_interrupts ();
+#ifdef USE_BLE
+    // Setup defaults for BLE variables
+    advertising_set_handle = SL_BT_INVALID_ADVERTISING_SET_HANDLE;
+    OpenedConnectionHandle = SL_BT_INVALID_CONNECTION_HANDLE;
+    transferEnabled = false;
+    sendNotification = false;
+    bytesRemaining = 0;
+#endif
+
+    // Display startup via LED briefly
+    enableI2CLED ();
+    setLed (LED_1, COLOUR_WHITE);
+    sl_sleeptimer_delay_millisecond (LED_BLIP_TIME_MSEC);
+    disableI2CLED ();
+
+    PRINT_INIT ("Orbio Sensor initialized\n\r");
+}
+
+/**************************************************************************//**
+ * Application Process Action.
+ *****************************************************************************/
+SL_WEAK void app_process_action(void)
+{
+  /////////////////////////////////////////////////////////////////////////////
+  // Put your additional application code here!                              //
+  // This is called infinitely.                                              //
+  // Do not call blocking functions from here!                               //
+  /////////////////////////////////////////////////////////////////////////////
+
+#ifdef USE_BLE
+    sendNextChunk ();
+#endif
+}
+
+/**************************************************************************//**
+ * Bluetooth stack event handler.
+ * This overrides the dummy weak implementation.
+ *
+ * @param[in] evt Event coming from the Bluetooth stack.
+ *****************************************************************************/
+void sl_bt_on_event(sl_bt_msg_t *evt)
+{
+  switch (SL_BT_MSG_ID(evt->header)) {
+    // -------------------------------
+    // This event indicates the device has started and the radio is ready.
+    // Do not call any stack command before receiving this boot event!
+    case sl_bt_evt_system_boot_id:
+#ifdef USE_BLE
+      setupDeviceName ();
+      setupAdvertising ();
+#ifdef BLE_KEEP_ALIVE
+      startAdvertising ();
+#endif
+#endif
+      // If either of these controls is available in sleep we do
+      // not need to start the sweep automatically
+#if defined(BLE_KEEP_ALIVE) || defined(CLI_KEEP_ALIVE)
+      // Explicitly shutdown / sleep ICs
+      setLowPowerMode ();
+#else
+      // Start the sweep immediately
+      sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
+#endif
+      break;
+
+    // -------------------------------
+    // This event indicates that MTU value has been exchanged
+    case sl_bt_evt_gatt_mtu_exchanged_id:
+      PRINT_INFO ("MTU exchanged value = %d bytes\n\r", evt->data.evt_gatt_mtu_exchanged.mtu);
+      break;
+
+    // -------------------------------
+    // This event indicates that connection parameters have changed
+    case sl_bt_evt_connection_parameters_id:
+    {
+      uint16_t mtu_size;
+      int connint, pdusize, latency, timeout;
+      (void)mtu_size;
+      (void)connint;
+      (void)pdusize;
+      (void)latency;
+      (void)timeout;
+      connint = (evt->data.evt_connection_parameters.interval * 50) / 4;
+      PRINT_INFO ("Connection interval = %d.%d msec\n\r", connint / 10, connint % 10);
+      pdusize = (evt->data.evt_connection_parameters.txsize);
+      PRINT_INFO ("PDU size = %d bytes\n\r", pdusize);
+      latency = (evt->data.evt_connection_parameters.latency);
+      PRINT_INFO ("Connection latency = %d intervals\n\r", latency);
+      timeout = (evt->data.evt_connection_parameters.timeout);
+      PRINT_INFO ("Connection timeout = %d msec\n\r", 10 * timeout);
+      sl_bt_gatt_server_get_mtu(evt->data.evt_connection_parameters.connection, &mtu_size);
+      PRINT_INFO ("MTU size = %d bytes\n\r", mtu_size);
+    }
+    break;
+
+    // -------------------------------
+    // This event indicates that connection data lengths have changed
+    case sl_bt_evt_connection_data_length_id:
+    {
+      int pdusize;
+      pdusize = (evt->data.evt_connection_data_length.tx_data_len);
+      (void)pdusize;
+      PRINT_INFO ("PDU size in data length event = %d bytes\n\r", pdusize);
+    }
+    break;
+
+    // -------------------------------
+    // This event indicates that a new connection was opened.
+    case sl_bt_evt_connection_opened_id:
+#ifdef USE_BLE
+      PRINT_INFO ("Opened BLE connection\n\r");
+      // Note the connection handle for future use
+      OpenedConnectionHandle = (evt->data.evt_connection_opened.connection);
+      // To be enabled by client
+      transferEnabled = false;
+      sendNotification = false;
+      bytesRemaining = 0;
+      sl_bt_connection_set_data_length (OpenedConnectionHandle, 251, 2120);
+      // Start LED timer to display BLE status
+      startLedTimer ();
+#endif
+      break;
+
+    // -------------------------------
+    // This event indicates that a connection was closed.
+    case sl_bt_evt_connection_closed_id:
+#ifdef USE_BLE
+      OpenedConnectionHandle = SL_BT_INVALID_CONNECTION_HANDLE;
+      // Set to default
+      transferEnabled = false;
+      sendNotification = false;
+      bytesRemaining = 0;
+      // If awake and collecting samples but BLE connection is lost then no
+      // point collecting samples so go to sleep
+      if (sleepState == SLEEP_STATE_WAKE)
+      {
+          PRINT_INFO ("BLE connection closed, go to sleep\n\r");
+          // Start timer to sleep till next sweep
+          sl_sleeptimer_stop_timer (&timer_startsweep);
+          sl_sleeptimer_start_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
+          PRINT_INFO ("Sleep and set wakeup after %d sec\n\r", sweep_interval_sec);
+          // Go to sleep and wait for timer
+          setLowPowerMode ();
+      }
+      else
+      {
+          PRINT_INFO ("BLE connection closed and already in sleep\n\r");
+      }
+
+      // Stop LED timer for BLE status
+      stopLedTimer ();
+
+      // To keep logic simple, unconditionally either start or stop advertising here
+      // depending on what is needed
+#ifdef BLE_KEEP_ALIVE
+      startAdvertising ();
+#else
+      stopAdvertising ();
+#endif
+#endif
+      break;
+
+#ifdef USE_BLE
+      /* This event is generated when a connected client has either
+       * 1) changed a Characteristic Client Configuration, meaning that they have enabled
+       * or disabled Notifications or Indications, or
+       * 2) sent a confirmation upon a successful reception of the indication. */
+      case sl_bt_evt_gatt_server_characteristic_status_id:
+        /* Check the characteristic in question using its ID.
+         * Also check client_config_flags, meaning that the characteristic client configuration
+         * was changed (notifications or indications enabled or disabled). */
+        if ((evt->data.evt_gatt_server_characteristic_status.characteristic == gattdb_sweepdata)
+            && (evt->data.evt_gatt_server_characteristic_status.status_flags == sl_bt_gatt_server_client_config)) {
+          uint16_t ccf = evt->data.evt_gatt_server_characteristic_status.client_config_flags;
+          if (ccf == sl_bt_gatt_notification) {
+            /* Transfers have been turned ON by the client */
+            transferEnabled = true;
+            sendNotification = true;
+            bytesRemaining = 0;
+            sweepcount = 0;
+            blestarttime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+            PRINT_INFO ("Sweep data Notifications turned on by the App\n\r");
+          }
+          else if (ccf == sl_bt_gatt_indication) {
+            PRINT_INFO ("Sweep data Indications turned on by the App: not supported as it is slow\n\r");
+          } else if (evt->data.evt_gatt_server_characteristic_status.client_config_flags == 0x00) {
+            /* Transfers have been turned OFF by the client */
+            transferEnabled = false;
+            sendNotification = false;
+            bytesRemaining = 0;
+            PRINT_INFO ("Sweep data transfers turned off by the App\n\r");
+          }
+        }
+        break;
+#endif
+
+    // This event indicates that a signal was posted from an interrupt or timer
+    case sl_bt_evt_system_external_signal_id:
+      // Wake via Accel timer
+      // The LIS2DH12 FIFO is 32 deep, so we can read it every 1 second with ample margin
+      // for timing.
+      // Accel data rate: 25 Hz, 3 axes, 2 bytes per axis = 150 bytes per second data
+      if (evt->data.evt_system_external_signal.extsignals & SIGNAL_ACCEL)
+      {
+          // Put pins in operational mode
+          enable_UART_pins ();
+          enable_SPI_pins ();
+          int num = read_accel_fifo ();
+#ifdef USE_BLE
+          handleNewPacket (ACTIVE_MODULE_ACCEL, (uint8_t *)resultArrayAccel, num * NUM_BYTES_PER_ACCEL_SAMPLE);
+#endif
+          // Disable pins after use
+          disable_UART_pins ();
+          disable_SPI_pins ();
+          sl_sleeptimer_stop_timer (&timer_readaccel);
+          // Check if Accel should continue
+          if (active_module == ACTIVE_MODULE_ACCEL)
+          {
+              // Start timer to read Accel after 1 second
+              sl_sleeptimer_start_timer_ms (&timer_readaccel, 1000, timer_cb_readaccel, NULL, 0, 0);
+          }
+      }
+#ifdef USE_PPG
+      // Wake via PPG interrupt
+      if (evt->data.evt_system_external_signal.extsignals & SIGNAL_PPG)
+      {
+          // Don't respond to interrupts if not initialised yet
+          if (ppg_init_done)
+          {
+              // Put pins in operational mode
+              enable_UART_pins ();
+              enable_SPI_pins ();
+              // Read the PPG FIFO and parse if no errors during the read
+              if (read_ppg_fifo () == true)
+                  parse_ppg_fifo ();
+              // Disable pins after use
+              disable_UART_pins ();
+              disable_SPI_pins ();
+          }
+      }
+#endif
+      // Wake via sweep timer
+      if (evt->data.evt_system_external_signal.extsignals & SIGNAL_SWEEP)
+      {
+          run_sweep_statemachine ();
+      }
+      break;
+
+    // -------------------------------
+    // This event indicates that client did a write
+    case sl_bt_evt_gatt_server_user_write_request_id:
+        if (evt->data.evt_gatt_server_user_write_request.characteristic == gattdb_set_parameters) {
+          PRINT_INFO ("Got set parameters from BLE client\n\r");
+          /* Send response to Write Request */
+          sl_bt_gatt_server_send_user_write_response(
+            evt->data.evt_gatt_server_user_write_request.connection,
+            gattdb_set_parameters,
+            SL_STATUS_OK);
+          char *payload = (char *)evt->data.evt_gatt_server_user_write_request.value.data;
+          int len = evt->data.evt_gatt_server_user_write_request.value.len;
+          processblesetting (payload, len);
+        }
+    break;
+
+    // This event indicates that client did a read
+    case sl_bt_evt_gatt_server_user_read_request_id:
+        if (evt->data.evt_gatt_server_user_read_request.characteristic == gattdb_report_fw) {
+          uint8_t fw = VERSION;
+          PRINT_INFO ("Got report firmware version from BLE client\n\r");
+          /* Send response to Read Request */
+          sl_bt_gatt_server_send_user_read_response(
+            evt->data.evt_gatt_server_user_read_request.connection,
+            gattdb_report_fw,
+            SL_STATUS_OK,
+            sizeof(fw),
+            &fw,
+            NULL);
+        }
+        else if (evt->data.evt_gatt_server_user_read_request.characteristic == gattdb_report_parameters) {
+          PRINT_INFO ("Got report settings from BLE client\n\r");
+          memset (reportsettings, 0, sizeof (reportsettings));
+          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d,%d", ioffset, qoffset, active_time_sec, sweep_interval_sec);
+          /* Send response to Read Request */
+          sl_bt_gatt_server_send_user_read_response(
+            evt->data.evt_gatt_server_user_read_request.connection,
+            gattdb_report_parameters,
+            SL_STATUS_OK,
+            strlen(reportsettings),
+            (uint8_t *)&reportsettings,
+            NULL);
+        }
+    break;
+
+    // -------------------------------
+    // Default event handler.
+    default:
+      break;
+  }
+}
+
+/**************************************************************************//**
+ * Functions called by CLI
+ *****************************************************************************/
+
+void cli_set_trigfreq(sl_cli_command_arg_t *arguments)
+{
+    int argc = sl_cli_get_argument_count(arguments);
+    if (argc != 1)
+    {
+        PRINT_ERROR("set_trigfreq: incorrect number of arguments. Expected 1!\n\r");
+        return;
+    }
+    uint8_t temp = sl_cli_get_argument_uint8(arguments, 0);
+    dosettrigfreq (temp);
+}
+
+void cli_set_iq_offsets(sl_cli_command_arg_t *arguments)
+{
+    int argc = sl_cli_get_argument_count(arguments);
+    if (argc != 2)
+    {
+        PRINT_ERROR("set_iq_offsets: incorrect number of arguments. Expected 2!\n\r");
+        return;
+    }
+    int temp1 = sl_cli_get_argument_int16(arguments, 0);
+    int temp2 = sl_cli_get_argument_int16(arguments, 1);
+    dosetiqoffsets (temp1, temp2);
+}
+
+void cli_set_pll_gain(sl_cli_command_arg_t *arguments)
+{
+    int argc = sl_cli_get_argument_count(arguments);
+    if (argc != 1)
+    {
+        PRINT_ERROR("set_pll_gain: incorrect number of arguments. Expected 1!\n\r");
+        return;
+    }
+    uint8_t temp1 = sl_cli_get_argument_uint8(arguments, 0);
+    dosetpllgain (temp1);
+}
+
+void cli_start_accel(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    dostartaccel ();
+}
+
+void cli_stop_accel(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    dostopaccel ();
+}
+
+#ifdef USE_PPG
+
+void cli_start_ppg(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    dostartppg ();
+}
+
+void cli_stop_ppg(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    dostopppg ();
+}
+
+#endif
+
+void cli_dosweep(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    dosweep ();
+}
+
+void cli_stop_sweep(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    dostopsweep ();
+}
+
+void cli_set_sweep_timing(sl_cli_command_arg_t *arguments)
+{
+    int argc = sl_cli_get_argument_count(arguments);
+    if (argc != 2)
+    {
+        PRINT_ERROR("set_sweep_timing: incorrect number of arguments. Expected 2!\n\r");
+        return;
+    }
+    int temp1 = sl_cli_get_argument_uint16(arguments, 0);
+    int temp2 = sl_cli_get_argument_uint16(arguments, 1);
+    dosetsweeptiming (temp1, temp2);
+}
+
+void cli_msweep(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    if (active_module)
+    {
+        PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
+        return;
+    }
+    manualsweep = true;
+    sweepState = SWEEP_STATE_INIT;
+    // Start timer to run sweeps after a delay
+    sl_sleeptimer_stop_timer (&timer_startsweep);
+    sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
+}
+
+void cli_print_iq(sl_cli_command_arg_t *arguments)
+{
+    int argc = sl_cli_get_argument_count(arguments);
+    if (argc != 1)
+    {
+        PRINT_ERROR("print_iq: incorrect number of arguments. Expected 1!\n\r");
+        return;
+    }
+    uint8_t temp = sl_cli_get_argument_uint8(arguments, 0);
+    if ((temp != 0) && (temp != 1))
+    {
+        PRINT_ERROR("print_iq: incorrect argument %d\n\r", temp);
+    }
+    else
+    {
+        iq_print_enabled = temp;
+    }
+}
+
+void cli_print_unit_id(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    PRINT_INFO ("Unit ID %s\n\r", devicename);
+}
+
+void cli_print_fw_ver(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    PRINT_INFO ("Firmware Version v%d\n\r", VERSION);
+}
+
+/* End of file */

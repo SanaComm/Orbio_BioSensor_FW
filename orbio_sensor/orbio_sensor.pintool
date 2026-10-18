@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="ASCII"?>
+<device:XMLDevice xmi:version="2.0" xmlns:xmi="http://www.omg.org/XMI" xmlns:device="http://www.silabs.com/ss/hwconfig/document/device.ecore" name="pin_tool.EFR32BG26B510F3200IM48" partId="mcu.arm.efr32.bg26.efr32bg26b510f3200im48" contextId="com.silabs.sdk.stack.sisdk:2024.6.1._1955975548">
+  <mode name="DefaultMode">
+    <property object="AIN0" propertyId="pin.name" value="RX_QN"/>
+    <property object="AIN1" propertyId="pin.name" value="RX_QP"/>
+    <property object="DefaultMode" propertyId="mode.diagramLocation" value="100, 100"/>
+    <property object="I2C0" propertyId="ABModule.selectedRequirement" value="i2c%T%SL_I2CSPM_INST0%T%sl_i2cspm_inst0_config.h"/>
+    <property object="I2C0" propertyId="ABPeripheral.included" value="true"/>
+    <property object="PA00" propertyId="pin.name" value="RAMP_CLK"/>
+    <property object="PA00" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PA03" propertyId="pin.name" value="RAMP_DIR"/>
+    <property object="PA03" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PA04" propertyId="pin.name" value="RESET_DOWNCONV"/>
+    <property object="PA04" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PA05" propertyId="pin.name" value="EN_POWER"/>
+    <property object="PA05" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PA06" propertyId="pin.name" value="LO_PLL_MUX"/>
+    <property object="PA06" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PA07" propertyId="pin.name" value="INT_ACCEL"/>
+    <property object="PA07" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PB00" propertyId="pin.name" value="VBAT_ADC"/>
+    <property object="PB00" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PC00" propertyId="pin.name" value="INT_OPT"/>
+    <property object="PC00" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PC01" propertyId="pin.name" value="CS_CMX994"/>
+    <property object="PC01" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PC02" propertyId="pin.name" value="CS_OPT"/>
+    <property object="PC02" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PC03" propertyId="pin.name" value="CS_ACCEL"/>
+    <property object="PC03" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PC06" propertyId="pin.name" value="CS_LO"/>
+    <property object="PC06" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PD00" propertyId="pin.name" value=""/>
+    <property object="PD01" propertyId="pin.name" value=""/>
+    <property object="PD05" propertyId="pin.name" value="TP1"/>
+    <property object="PD05" propertyId="pin.reserve" value="Reserved"/>
+    <property object="PORTIO" propertyId="portio.i2c0.enable.scl" value="Enabled"/>
+    <property object="PORTIO" propertyId="portio.i2c0.enable.sda" value="Enabled"/>
+    <property object="PORTIO" propertyId="portio.i2c0.location.scl" value="36"/>
+    <property object="PORTIO" propertyId="portio.i2c0.location.sda" value="37"/>
+    <property object="PORTIO" propertyId="portio.lfxo.enable.lfxtal_i" value="Enabled"/>
+    <property object="PORTIO" propertyId="portio.lfxo.enable.lfxtal_o" value="Enabled"/>
+    <property object="PORTIO" propertyId="portio.usart0.enable.rx" value="Enabled"/>
+    <property object="PORTIO" propertyId="portio.usart0.enable.tx" value="Enabled"/>
+    <property object="PORTIO" propertyId="portio.usart0.location.rx" value="51"/>
+    <property object="PORTIO" propertyId="portio.usart0.location.tx" value="50"/>
+    <property object="PORTIO" propertyId="portio.usart1.enable.clk" value="Enabled"/>
+    <property object="PORTIO" propertyId="portio.usart1.enable.rx" value="Enabled"/>
+    <property object="PORTIO" propertyId="portio.usart1.enable.tx" value="Enabled"/>
+    <property object="PORTIO" propertyId="portio.usart1.location.clk" value="39"/>
+    <property object="PORTIO" propertyId="portio.usart1.location.rx" value="41"/>
+    <property object="PORTIO" propertyId="portio.usart1.location.tx" value="40"/>
+    <property object="PTI" propertyId="ABModule.selectedRequirement" value="pti%T%SL_RAIL_UTIL_PTI%T%sl_rail_util_pti_config.h"/>
+    <property object="PTI" propertyId="ABPeripheral.included" value="true"/>
+    <property object="USART0" propertyId="ABModule.selectedRequirement" value="usart%T%SL_IOSTREAM_USART_INST0%T%sl_iostream_usart_inst0_config.h"/>
+    <property object="USART0" propertyId="ABPeripheral.included" value="true"/>
+    <property object="USART1" propertyId="ABModule.selectedRequirement" value="usart%T%SL_SPIDRV_INST0%T%sl_spidrv_inst0_config.h"/>
+    <property object="USART1" propertyId="ABPeripheral.included" value="true"/>
+  </mode>
+  <modeTransition>
+    <property object="RESET &#x2192; DefaultMode" propertyId="modeTransition.source" value="RESET"/>
+    <property object="RESET &#x2192; DefaultMode" propertyId="modeTransition.target" value="DefaultMode"/>
+  </modeTransition>
+</device:XMLDevice>

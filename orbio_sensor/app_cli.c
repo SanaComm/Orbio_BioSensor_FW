@@ -13,14 +13,14 @@ void cli_stop_ppg(sl_cli_command_arg_t *arguments);
 void cli_dosweep(sl_cli_command_arg_t *arguments);
 void cli_stop_sweep(sl_cli_command_arg_t *arguments);
 void cli_set_sweep_timing(sl_cli_command_arg_t *arguments);
-void cli_msweep(sl_cli_command_arg_t *arguments);
+void cli_set_freq(sl_cli_command_arg_t *arguments);
 void cli_print_iq(sl_cli_command_arg_t *arguments);
 void cli_print_unit_id(sl_cli_command_arg_t *arguments);
 void cli_print_fw_ver(sl_cli_command_arg_t *arguments);
 
 static const sl_cli_command_info_t cmd_set_trigfreq =
     SL_CLI_COMMAND(cli_set_trigfreq, "Set TP1 trigger frequency (default 0)\r",
-                    "frequency 0 (All), 1 to 20 (Individual)\r" SL_CLI_UNIT_SEPARATOR,
+                    "frequency 0 (All), 1 to 39 (Individual)\r" SL_CLI_UNIT_SEPARATOR,
                     {
                         SL_CLI_ARG_UINT8,
                         SL_CLI_ARG_END,
@@ -96,10 +96,11 @@ static const sl_cli_command_info_t cmd_set_sweep_timing =
                         SL_CLI_ARG_END,
                     });
 
-static const sl_cli_command_info_t cmd_msweep =
-    SL_CLI_COMMAND(cli_msweep, "Manual sweep\r",
-                    "" SL_CLI_UNIT_SEPARATOR,
+static const sl_cli_command_info_t cmd_set_freq =
+    SL_CLI_COMMAND(cli_set_freq, "Set desired frequency\r",
+                    "freq 700 MHz to 1080 MHz in steps of 10 MHz\r" SL_CLI_UNIT_SEPARATOR,
                     {
+                        SL_CLI_ARG_UINT16,
                         SL_CLI_ARG_END,
                     });
 
@@ -139,7 +140,7 @@ static sl_cli_command_entry_t custom_cmd_table[] =
     {"set_sweep_timing", &cmd_set_sweep_timing, false},
     {"dosweep", &cmd_dosweep, false},
     {"stop_sweep", &cmd_stop_sweep, false},
-    {"msweep", &cmd_msweep, false},
+    {"set_freq", &cmd_set_freq, false},
     {"print_iq", &cmd_print_iq, false},
     {"print_unit_id", &cmd_print_unit_id, false},
     {"print_fw_ver", &cmd_print_fw_ver, false},

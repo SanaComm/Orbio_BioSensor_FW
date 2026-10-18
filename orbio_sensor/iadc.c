@@ -57,7 +57,7 @@
 // Option to use LDMA to transfer ADC samples
 #define USE_ADC_LDMA
 // For testing FIFO timing
-#define TOGGLE_RAMP_DIR
+#undef TOGGLE_RAMP_DIR
 
 // Choose one of these three
 #undef PRECISION_20BIT
@@ -79,21 +79,12 @@
  * As these are specialised Analog Input pins, no GPIO mapping
  * to the bus is needed.
  */
-#define IADC_POS_INPUT_0_PORT_PIN     iadcPosInputPadAna0;
-#define IADC_POS_INPUT_1_PORT_PIN     iadcPosInputPadAna2;
-#define IADC_NEG_INPUT_0_PORT_PIN     iadcNegInputPadAna1;
-#define IADC_NEG_INPUT_1_PORT_PIN     iadcNegInputPadAna3;
-
-#if 0
-#define IADC_POS_INPUT_0_BUS          BBUSALLOC
-#define IADC_POS_INPUT_0_BUSALLOC     GPIO_BBUSALLOC_BEVEN0_ADC0
-#define IADC_NEG_INPUT_0_BUS          BBUSALLOC
-#define IADC_NEG_INPUT_0_BUSALLOC     GPIO_BBUSALLOC_BODD0_ADC0
-#define IADC_POS_INPUT_1_BUS          BBUSALLOC
-#define IADC_POS_INPUT_1_BUSALLOC     GPIO_BBUSALLOC_BEVEN0_ADC0
-#define IADC_NEG_INPUT_1_BUS          BBUSALLOC
-#define IADC_NEG_INPUT_1_BUSALLOC     GPIO_BBUSALLOC_BODD0_ADC0
-#endif
+#define IADC_POS_INPUT_0_PORT_PIN     iadcPosInputPadAna0
+#define IADC_POS_INPUT_1_PORT_PIN     iadcPosInputPadAna2
+#define IADC_NEG_INPUT_0_PORT_PIN     iadcNegInputGnd
+#define IADC_NEG_INPUT_1_PORT_PIN     iadcNegInputGnd
+//#define IADC_NEG_INPUT_0_PORT_PIN     iadcNegInputPadAna1
+//#define IADC_NEG_INPUT_1_PORT_PIN     iadcNegInputPadAna3
 
 /*******************************************************************************
  ***************************   GLOBAL VARIABLES   ******************************
@@ -122,7 +113,6 @@ void initIADC (void)
   IADC_ScanTable_t initScanTable = IADC_SCANTABLE_DEFAULT;
 
   CMU_ClockEnable(cmuClock_IADC0, true);
-  CMU_ClockEnable(cmuClock_GPIO, true);
    
   // Select clock for IADC as FSRCO which is 20MHz
   // Use the FSRC0 as the IADC clock so it can run in EM2
@@ -164,7 +154,7 @@ void initIADC (void)
   initAllConfigs.configs[0].osrHighSpeed = iadcCfgOsrHighSpeed16x;
   initAllConfigs.configs[0].digAvg = iadcDigitalAverage4;
 #endif
-  #ifdef PRECISION_15BIT
+#ifdef PRECISION_15BIT
   initAllConfigs.configs[0].osrHighSpeed = iadcCfgOsrHighSpeed8x;
   initAllConfigs.configs[0].digAvg = iadcDigitalAverage2;
 #endif
@@ -252,14 +242,6 @@ void initIADC (void)
 
   // Initialize scan
   IADC_initScan(IADC0, &initScan, &initScanTable);
-
-#if 0
-  // Allocate the analog bus for ADC0 inputs
-  GPIO->IADC_POS_INPUT_0_BUS |= IADC_POS_INPUT_0_BUSALLOC;
-  GPIO->IADC_POS_INPUT_1_BUS |= IADC_POS_INPUT_1_BUSALLOC;
-  GPIO->IADC_NEG_INPUT_0_BUS |= IADC_NEG_INPUT_0_BUSALLOC;
-  GPIO->IADC_NEG_INPUT_1_BUS |= IADC_NEG_INPUT_1_BUSALLOC;
-#endif
 
 #if !defined(USE_ADC_LDMA) || defined (TOGGLE_RAMP_DIR)
   // Clear any previous interrupt flags
@@ -430,6 +412,7 @@ static int freeLDMADRV (void)
 // Buffer to store IADC samples
 #define DUMMY_SAMPLES (5)
 uint32_t scanBuffer[NUM_INPUTS * (NUM_SAMPLES_PER_FREQ + DUMMY_SAMPLES)];
+void exit_atomic (void);
 
 void doIADC (void)
 {
@@ -441,6 +424,7 @@ void doIADC (void)
     IADC_command(IADC0, iadcCmdEnableTimer);
 #endif
     IADC_command(IADC0, iadcCmdStartScan);
+    exit_atomic ();
     while (conversiondone == false);
 #ifdef USE_ADC_TIMER
     // Disable the IADC timer once a scan is done

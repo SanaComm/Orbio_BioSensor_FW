@@ -1,7 +1,6 @@
 # Orbio BioSensor Firmware
 
 - This repository contains the source code for Firmware
-- Firmware version v15 used for new hardware bringup
 - Based on Silicon Labs Simplicity Studio Version SV5.12.0.1
  * Project name is orbio_sensor
  * Compiled with GNU ARM Compiler v12.2.1
@@ -12,7 +11,15 @@
 
 Description of most recent firmware version changes:
 
-orbio_biosensor_v16:
+==> orbio_biosensor_v17:
+- Added code to keep the PLL+IADC code atomic and not be interrupted by LED timer
+- Removed switch_off_en_power_hfxo & switch_on_en_power_hfxo and implemented EMU_EFPEM23PresleepHook & EMU_EFPEM23PostsleepHook instead
+- Changed all LEDx_DRV current range to 32 mA (from 128 mA)
+- Disable IR measurements in Meas3/Meas4 as they are causing COMPB errors
+- Added command set_freq to set any sweep frequency and also respond to commands
+- Removed command msweep as set_freq does the same but better
+
+==> orbio_biosensor_v16:
 - Added wait for BLE operations to stop before switching off HFXO/EN_POWER
 - Change A_FULL interrupt to no repeat else it triggers before status read and cleared
 - BUGFIX: Corrected PWR_RDY interpretation

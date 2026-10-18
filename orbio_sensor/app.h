@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
+#include "sli_cli_io.h"
 #include <sl_sleeptimer.h>
 #include "sl_iostream_usart_inst0_config.h"
 
@@ -84,10 +85,12 @@ extern uint8_t pll_gain;
 #define START_FREQ_KHZ (700000)
 #define END_FREQ_KHZ (1090000)
 #define FREQ_STEP_KHZ (10000)
+#define VCO_SWITCH_FREQ_KHZ (800000)
 #define NUM_FREQS ((END_FREQ_KHZ - START_FREQ_KHZ) / FREQ_STEP_KHZ)
 #define RESULT_SIZE (NUM_FREQS * NUM_SAMPLES_PER_FREQ)
 
 void doOneSweep (void);
+void doSetFreq (void);
 
 /**************************************************************************//**
  * Sweep related globals
@@ -96,9 +99,9 @@ void doOneSweep (void);
 extern uint8_t trigfreq;
 extern int16_t ioffset, qoffset;
 extern uint8_t sync_mode;
-extern bool manualsweep;
 extern bool iq_print_enabled;
 extern bool userinput;
+extern uint32_t frequency_to_set_khz;
 
 /**************************************************************************//**
  * ADC related

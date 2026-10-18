@@ -150,7 +150,7 @@ void ppg_agc_init(ppg_agc_t *agc)
                 // This sets the current of this DRVx driver (0 to 255)
                 ch->drv[ch->num_drv].pa_cur = value;
                 ch->num_drv++;
-                PRINT_AGC_INIT ("AGC %d: DRVx %d (%02x) is active and set to %d\n\r", c, d, addr, value);
+                PRINT_AGC_INIT ("AGC %d: DRVx %d (0x%02x) is active and set to %d\n\r", c, d, addr, value);
             }
         }
     }

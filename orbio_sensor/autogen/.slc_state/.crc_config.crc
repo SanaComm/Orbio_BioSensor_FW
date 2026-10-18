@@ -11,6 +11,7 @@ psa_crypto_config.h=687530867
 sl_bluetooth_advertiser_config.h=1199961774
 sl_bluetooth_config.h=-602654751
 sl_bluetooth_connection_config.h=-1672143068
+sl_board_control_config.h=-747259684
 sl_bt_host_adaptation_config.h=2078815630
 sl_bt_in_place_ota_dfu_config.h=1544707737
 sl_cli_config.h=2102969254

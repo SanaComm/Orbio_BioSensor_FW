@@ -366,7 +366,7 @@ int setLMX2572LP (int freq_khz, int rxtx, int offset_khz)
         int send = 1;
         // After setting first frequency no need to send most of the registers
         // The exception is 800 MHz where a VCO change occurs, so should send
-        if ((freq_khz != START_FREQ_KHZ) && (freq_khz != (800 * 1000))) send = 0;
+        if ((freq_khz != START_FREQ_KHZ) && (freq_khz != VCO_SWITCH_FREQ_KHZ)) send = 0;
         PRINT_LMX2572LP_INFO ("%06lx\n\r", reg);
         if ((reg & 0xFF0000) == 0x240000)
         {

@@ -33,17 +33,17 @@
 #include "gatt_db.h"
 #include "em_gpio.h"
 #include "em_cmu.h"
+#include "em_emu.h"
 #include "sl_cli.h"
-#include "sli_clock_manager_hal.h"
-#include "sl_iostream_usart_inst0_config.h"
 #include "app.h"
 #include "gpiointerrupt.h"
 #include "ktd2052a.h"
 #include "max86171.h"
 #include "ppg_agc.h"
 #include "accel.h"
+#include "sl_cli_handles.h"
 
-#define VERSION (16)
+#define VERSION (17)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -100,10 +100,9 @@ uint8_t trigfreq;
 uint8_t pll_gain;
 int16_t ioffset, qoffset;
 uint8_t sync_mode;
-bool manualsweep;
+uint32_t frequency_to_set_khz;
 bool iq_print_enabled;
-//#define SWEEP_INTERVAL_DEFAULT_SEC (10 * 60)
-#define SWEEP_INTERVAL_DEFAULT_SEC (60)
+#define SWEEP_INTERVAL_DEFAULT_SEC (1 * 60)
 #define ACTIVE_TIME_DEFAULT_SEC (30)
 static uint16_t sweep_interval_sec;
 static uint16_t active_time_sec;
@@ -125,9 +124,10 @@ static max86171_t max86171_dev;
 typedef enum
 {
     SWEEP_STATE_INIT = 1,
-    SWEEP_STATE_SWEEP = 2,
-    SWEEP_STATE_END = 3,
-    SWEEP_STATE_NONE = 4,
+    SWEEP_STATE_SWEEP,
+    SWEEP_STATE_SETFREQ,
+    SWEEP_STATE_END,
+    SWEEP_STATE_NONE,
 } sweep_state_t;
 static sweep_state_t sweepState;
 
@@ -228,9 +228,6 @@ static void PPGInterrupt (uint8_t pin)
     EN_POWER/HFXO related utility functions to switch on/off
 **************************************************************************************************/
 
-// Switch on only if off 
-static uint8_t hfxo_enable_bits;
-
 // This is called from sl_platform_init before sl_clock_manager_init as HFXO will be initialised there
 // and needs EN_POWER to be powered up.
 // This is done so that all the drivers will be set based on PCLK which is based on SYSCLK = HFXO
@@ -243,49 +240,14 @@ void my_en_power_init (void)
     GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 1);
 }
 
-// EN_POWER disable
-// This is to be called after stopping Bluetooth or before going to sleep.
-static void switch_off_en_power_hfxo (app_module_t x)
+void EMU_EFPEM23PresleepHook (void)
 {
-    // Clear the module which no longer needs EN_POWER/HFXO
-    hfxo_enable_bits &= ~x;
-    if (hfxo_enable_bits == 0)
-    {
-        sl_status_t sc;
-        PRINT_INFO ("Wait till BLE stack says okay to sleep ...");
-        while (sli_bt_is_ok_to_sleep () == false);
-        PRINT_INFO ("OK!\n\r\n\r");
-        // Switch back to HFRCO (e.g., when Bluetooth radio is idle)
-        sc = sli_clock_manager_hal_set_sysclk_source (SL_OSCILLATOR_HFRCODPLL);
-        app_assert_status(sc);
-        // Wait a while for HFRCO to settle
-        sl_sleeptimer_delay_millisecond (100);
-        // And then remove power from PLLs, Downconvertor, TCXO
-        GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 0);
-        // Wait a while for EN_POWER to settle
-        sl_sleeptimer_delay_millisecond (100);
-    }
+    GPIO_PinOutClear(EN_POWER_PORT, EN_POWER_PIN);
 }
 
-// EN_POWER enable
-// This is to be called before starting Bluetooth and after wake from
-// sleep for any measurement as the SPI bus initialisations were done when HFXO
-// was active.
-static void switch_on_en_power_hfxo (app_module_t x)
+void EMU_EFPEM23PostsleepHook (void)
 {
-    // Only enable if not enabled already
-    if (hfxo_enable_bits == 0)
-    {
-        sl_status_t sc;
-        // First powerup PLLs, Downconvertor, TCXO
-        GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 1);
-        // Wait a while for power to various ICs to settle
-        sl_sleeptimer_delay_millisecond (100);
-        // And then switch to HFXO (e.g., before/at start of Bluetooth radio activity)
-        sc = sli_clock_manager_hal_set_sysclk_source (SL_OSCILLATOR_HFXO);
-        app_assert_status(sc);
-    }
-    hfxo_enable_bits |= x;
+    GPIO_PinOutSet(EN_POWER_PORT, EN_POWER_PIN);
 }
 
 #ifdef USE_BLE
@@ -402,9 +364,6 @@ static void startAdvertising (void)
 {
     sl_status_t sc;
 
-    // Check if EN_POWER and HFXO have to be switched on before starting BLE activity
-    switch_on_en_power_hfxo (ACTIVE_MODULE_BLE);
-
     // Start advertising and enable connections.
     sc = sl_bt_legacy_advertiser_start(advertising_set_handle, sl_bt_legacy_advertiser_connectable);
     app_assert_status(sc);
@@ -426,9 +385,6 @@ static void stopAdvertising (void)
     sc = sl_bt_advertiser_stop(advertising_set_handle);
     app_assert_status(sc);
     PRINT_INFO ("stopAdvertising\n\r");
-
-    // Check if EN_POWER and HFXO have to be switched off
-    switch_off_en_power_hfxo (ACTIVE_MODULE_BLE);
 }
 
 #endif
@@ -768,8 +724,6 @@ static void disableI2CLED (void)
 static void unsetLowPowerMode (void)
 {
     sleepState = SLEEP_STATE_WAKE;
-    // Check if EN_POWER and HFXO have to be switched on before starting UART activity
-    switch_on_en_power_hfxo (ACTIVE_MODULE_CLI);
     // Enable required pins
     BOARD_pins_init ();
 #ifdef USE_BLE
@@ -804,10 +758,6 @@ static void setLowPowerMode (void)
     disableIADC ();
     // Disable used pins
     BOARD_pins_uninit ();
-#ifndef CLI_KEEP_ALIVE
-    // Check if EN_POWER and HFXO have to be switched off
-    switch_off_en_power_hfxo (ACTIVE_MODULE_CLI);
-#endif
 }
 
 // Setup Accel and PPG interrupts
@@ -988,7 +938,6 @@ static uint8_t resultArrayPPG[(MAX86171_NUM_MEAS - 1) * 3 * MAX86171_NUM_FRAMES]
 // To be called after PPG FIFO data has been read
 static void parse_ppg_fifo (void)
 {
-return;
     /* ================================================================
      * Step 7 — inside while(1), after the MAX86171_INT_f block
      * Parse FIFO.
@@ -1198,6 +1147,8 @@ static void stopLedTimer (void)
  * Sweep related
  *****************************************************************************/
 
+static uint32_t last_set_frequency;
+
 static void run_sweep_statemachine (void)
 {
     switch (sweepState)
@@ -1210,26 +1161,29 @@ static void run_sweep_statemachine (void)
         sweepcount = 0;
         // Needed here for when sweep wakes up from sleep, or BLE / CLI command
         active_module = ACTIVE_MODULE_SWEEP;
-        // Check if EN_POWER and HFXO have to be switched on before starting Sweep activity
-        switch_on_en_power_hfxo (ACTIVE_MODULE_SWEEP);
         // Set to operating mode
         unsetLowPowerMode ();
         // Start LED timer to display Sweep status
         startLedTimer ();
-        if (manualsweep == true)
-        {
-            PRINT_INFO ("Manual sweep for %d sec ... press SPACE key to advance frequency\n\r", active_time_sec);
-        }
-        else
+        // Normal sweep
+        if (frequency_to_set_khz == 0)
         {
             PRINT_INFO ("Sweep for %d sec ... press any key to break\n\r", active_time_sec);
+            sweepState = SWEEP_STATE_SWEEP;
+        }
+        // Set specific frequency
+        else
+        {
+            PRINT_INFO ("Set frequency %ld MHz ... send stop_sweep to break\n\r", frequency_to_set_khz / 1000);
+            PRINT_INFO ("Use > key to move forward in frequency and < key to move backward\n\r");
+            sweepState = SWEEP_STATE_SETFREQ;
+            last_set_frequency = 0;
         }
         // Enable downconvertor and IADC
         resetCMX994 ();
         enableCMX994 ();
         setCMX994Offset (ioffset, qoffset);
         initIADC();
-        sweepState = SWEEP_STATE_SWEEP;
         // Continue with sweep
         if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
         {
@@ -1284,6 +1238,55 @@ static void run_sweep_statemachine (void)
         }
         break;
 
+        case SWEEP_STATE_SETFREQ:
+        {
+            if (last_set_frequency != frequency_to_set_khz)
+                doSetFreq ();
+            last_set_frequency = frequency_to_set_khz;
+            int c = 0;
+            int len = sl_cli_handles[0]->input_len;
+            int pos = sl_cli_handles[0]->input_pos;
+            if (len)
+            {
+                c = sl_cli_handles[0]->input_buffer[pos - 1];
+                // Only erase these keys so that normal commands are not ignored
+                if ((c == '<') || (c == '>'))
+                {
+                    sl_cli_handles[0]->input_buffer[pos - 1] = '\0';
+                    sl_cli_handles[0]->input_len--;
+                    sl_cli_handles[0]->input_pos--;
+                    userinput = true;
+                }
+            }
+            if ((userinput == true) && (c == '>'))
+            {
+                frequency_to_set_khz += FREQ_STEP_KHZ;
+                // Wrap around frequency
+                if (frequency_to_set_khz == END_FREQ_KHZ)
+                    frequency_to_set_khz = START_FREQ_KHZ;
+                last_set_frequency = 0;
+            }
+            else if ((userinput == true) && (c == '<'))
+            {
+                frequency_to_set_khz -= FREQ_STEP_KHZ; 
+                // Wrap around frequency
+                if (frequency_to_set_khz == START_FREQ_KHZ)
+                    frequency_to_set_khz = END_FREQ_KHZ;
+                last_set_frequency = 0;
+            }
+            if (active_module == 0)
+            {
+                // Finish up sweep
+                sweepState = SWEEP_STATE_END;
+                last_set_frequency = 0;
+            }
+            if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
+            {
+                PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal END\n\r");
+            }
+        }
+        break;
+
         case SWEEP_STATE_END:
         {
         uint32_t bleendtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
@@ -1303,12 +1306,11 @@ static void run_sweep_statemachine (void)
         {
             PRINT_INFO ("Sweep has been stopped, so sleep\n\r");
         }
+        frequency_to_set_khz = 0;
         // Stop LED timer for Sweep status
         stopLedTimer ();
         // Go to sleep and wait for timer
         setLowPowerMode ();
-        // Check if EN_POWER and HFXO have to be switched off
-        switch_off_en_power_hfxo (ACTIVE_MODULE_SWEEP);
         }
         break;
 
@@ -1341,6 +1343,7 @@ static void dosetiqoffsets (int temp1, int temp2)
         PRINT_INFO ("Set Ioffset = %d mV, Qoffset = %d mV\n\r", temp1, temp2);
         ioffset = temp1;
         qoffset = temp2;
+        setCMX994Offset (ioffset, qoffset);
     }
     else
     {
@@ -1389,7 +1392,6 @@ static void dosweep (void)
         PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
         return;
     }
-    manualsweep = false;
     sweepState = SWEEP_STATE_INIT;
     // Start timer to run sweeps after a delay
     sl_sleeptimer_stop_timer (&timer_startsweep);
@@ -1426,8 +1428,6 @@ static void dostartppg (void)
         return;
     }
     active_module = ACTIVE_MODULE_PPG;
-    // Check if EN_POWER and HFXO have to be switched on before starting PPG activity
-    switch_on_en_power_hfxo (ACTIVE_MODULE_PPG);
     // Start LED timer to display PPG status
     startLedTimer ();
     // Initialise MAX86171 and set for sample collection
@@ -1446,8 +1446,6 @@ static void dostopppg (void)
     active_module = 0;
     // Stop LED timer for PPG status
     stopLedTimer ();
-    // Check if EN_POWER and HFXO have to be switched off
-    switch_off_en_power_hfxo (ACTIVE_MODULE_PPG);
 }
 
 #endif
@@ -1463,8 +1461,6 @@ static void dostartaccel (void)
     // Start timer to read Accel after 1 second
     sl_sleeptimer_stop_timer (&timer_readaccel);
     sl_sleeptimer_start_timer_ms (&timer_readaccel, 1000, timer_cb_readaccel, NULL, 0, 0);
-    // Check if EN_POWER and HFXO have to be switched on before starting Accel activity
-    switch_on_en_power_hfxo (ACTIVE_MODULE_ACCEL);
     // Start LED timer to display Accel status
     startLedTimer ();
     // Put pins in operational mode
@@ -1487,8 +1483,6 @@ static void dostopaccel (void)
     active_module = 0;
     // Stop LED timer for Accel status
     stopLedTimer ();
-    // Check if EN_POWER and HFXO have to be switched off
-    switch_off_en_power_hfxo (ACTIVE_MODULE_ACCEL);
 }
 
 /**************************************************************************//**
@@ -1644,6 +1638,18 @@ static void processblesetting (char *payload, int len)
  *****************************************************************************/
 SL_WEAK void app_init(void)
 {
+#ifdef MEASURE_EM2_CURRENT
+    enable_SPI_pins ();
+    max86171_shutdown(&max86171_dev);
+    shutoffRFICs ();
+    accelPowerOff();
+    setLedShutdown ();
+    BOARD_pins_uninit ();
+    while (1)
+    {
+        EMU_EnterEM2 (true);
+    }
+#endif
     PRINT_INIT ("Orbio Sensor version %d starting up ...\n\r", VERSION);
     enable_SPI_pins ();
     // Keep Accel always on for now, later put into low power mode in sleep if needed
@@ -1660,13 +1666,12 @@ SL_WEAK void app_init(void)
     ioffset = 0;
     qoffset = 0;
     sync_mode = 0;
-    manualsweep = false;
+    frequency_to_set_khz = 0;
+    iq_print_enabled = false;
     sweep_interval_sec = SWEEP_INTERVAL_DEFAULT_SEC;
     active_time_sec = ACTIVE_TIME_DEFAULT_SEC;
     sweepState = SWEEP_STATE_INIT;
     sleepState = SLEEP_STATE_WAKE;
-    // Hack initialisation but it works
-    hfxo_enable_bits = ACTIVE_MODULE_BLE | ACTIVE_MODULE_CLI;
     active_module = ACTIVE_MODULE_NONE;
     // Setup Accel and PPG interrupts
     setup_interrupts ();
@@ -2064,19 +2069,24 @@ void cli_set_sweep_timing(sl_cli_command_arg_t *arguments)
     dosetsweeptiming (temp1, temp2);
 }
 
-void cli_msweep(sl_cli_command_arg_t *arguments)
+void cli_set_freq(sl_cli_command_arg_t *arguments)
 {
-    (void)arguments;
-    if (active_module)
+    int argc = sl_cli_get_argument_count(arguments);
+    if (argc != 1)
     {
-        PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
+        PRINT_ERROR("set_freq: incorrect number of arguments. Expected 1!\n\r");
         return;
     }
-    manualsweep = true;
-    sweepState = SWEEP_STATE_INIT;
-    // Start timer to run sweeps after a delay
-    sl_sleeptimer_stop_timer (&timer_startsweep);
-    sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
+    uint16_t temp = sl_cli_get_argument_uint16(arguments, 0);
+    // Check range and multiple of step frequency
+    if ((temp < START_FREQ_KHZ / 1000) && (temp >= END_FREQ_KHZ / 1000) && ((temp % (FREQ_STEP_KHZ / 1000)) != 0))
+    {
+        PRINT_ERROR("set_freq: incorrect argument %d\n\r", temp);
+    }
+    else
+    {
+        frequency_to_set_khz = temp * 1000;
+    }
 }
 
 void cli_print_iq(sl_cli_command_arg_t *arguments)

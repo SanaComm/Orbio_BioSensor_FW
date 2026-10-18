@@ -3,7 +3,6 @@
 #include "em_gpio.h"
 #include "em_cmu.h"
 #include "pin_config.h"
-#include "sli_cli_io.h"
 #include "sl_spidrv_instances.h"
 #include "sl_spidrv_inst0_config.h"
 #include "sl_udelay.h"
@@ -41,6 +40,20 @@ void initStoreSweep (void)
 static int patternindex;
 #endif
 
+// To keep the LED timer from firing during PLL+IADC operation
+// which we need to be as identical in time as possible
+// TODO: will this mess up Bluetooth?
+static CORE_irqState_t myIRQState;
+static void enter_atomic (void)
+{
+    myIRQState = CORE_EnterAtomic ();
+}
+
+void exit_atomic (void)
+{
+    CORE_ExitAtomic(myIRQState);
+}
+
 static void waitForPLLLock (void)
 {
     // Wait for PLL lock
@@ -70,13 +83,14 @@ void doOneSweep (void)
 #ifdef MEASURE_TIMING
         uint32_t time1 = sl_sleeptimer_get_tick_count();
 #endif
-        // Set LO frequency: note this goes to LO so should be X2
+        // Set LO frequency
         setLMX2572LP (i, 1, 0);
 
 #ifdef MEASURE_TIMING
         uint32_t time2 = sl_sleeptimer_get_tick_count();
 #endif
 
+        enter_atomic ();
         waitForPLLLock ();
 
 #ifdef MEASURE_TIMING
@@ -121,17 +135,7 @@ void doOneSweep (void)
         }
 #endif
 
-        // User input related
-        if (manualsweep == true)
-        {
-            int c = -1;
-            // Wait for spacebar to continue to next frequency
-            while (c != ' ')
-            {
-                c = sli_cli_io_getchar ();
-            }
-        }
-        else if (iq_print_enabled == false)
+        if (iq_print_enabled == false)
         {
             int c = sli_cli_io_getchar ();
             if ((c != EOF) && ((char)c != '\0'))
@@ -141,6 +145,21 @@ void doOneSweep (void)
             }
         }
     }
+#if 1
+    int i_avg, q_avg, cntr = 0;
+    PRINT_SWEEP_INFO ("\n\r");
+    for (int i = 0; i < NUM_FREQS; i++)
+    {
+        i_avg = 0, q_avg = 0;
+        for (int k = 0; k < NUM_SAMPLES_PER_FREQ; k++)
+        {
+            i_avg += resultArray[cntr][0];
+            q_avg += resultArray[cntr][1];
+            cntr++;
+        }
+        PRINT_SWEEP_INFO ("%d:Iavg = %d, Qavg = %d\n\r", i, i_avg / NUM_SAMPLES_PER_FREQ, q_avg / NUM_SAMPLES_PER_FREQ);
+    }
+#endif
     // Set back to default clock rate for other devices
     SPIDRV_SetBitrate (sl_spidrv_inst0_handle, SL_SPIDRV_INST0_BITRATE);
     PRINT_SWEEP_INFO (" sweep done\n\r");
@@ -184,3 +203,26 @@ void doOneSweep (void)
     }
 #endif
 }
+
+void doSetFreq (void)
+{
+    // Set to fast clock rate for PLL
+    SPIDRV_SetBitrate (sl_spidrv_inst0_handle, CMU_ClockFreqGet (cmuClock_PCLK) / 2);
+    // First set the base frequency so that PLL code will reset and do full calibration
+    if (frequency_to_set_khz < VCO_SWITCH_FREQ_KHZ)
+        setLMX2572LP (START_FREQ_KHZ, 1, 0);
+    else
+        setLMX2572LP (VCO_SWITCH_FREQ_KHZ, 1, 0);
+    waitForPLLLock ();
+    if ((frequency_to_set_khz != START_FREQ_KHZ) && (frequency_to_set_khz != VCO_SWITCH_FREQ_KHZ))
+    {
+        // Set LO frequency
+        setLMX2572LP (frequency_to_set_khz, 1, 0);
+        waitForPLLLock ();
+    }
+    // Set back to default clock rate for other devices
+    SPIDRV_SetBitrate (sl_spidrv_inst0_handle, SL_SPIDRV_INST0_BITRATE);
+    PRINT_SWEEP_INFO ("Frequency %ld MHz set\n\r", frequency_to_set_khz / 1000);
+}
+
+/* End of file */

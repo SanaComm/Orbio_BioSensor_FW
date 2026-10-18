@@ -148,7 +148,7 @@ static const max86171_reg_config_t g_max86171_base_config[] = {
         MAX86171_F_MAKE(MAX86171_FIFO_FLUSH,        1)},  /* flush FIFO on init */
 
     // System Configuration
-	{MAX86171_REG_SYS_CFG1,     /* 0x0C = 0x02 */
+    {MAX86171_REG_SYS_CFG1,     /* 0x0C = 0x02 */
         MAX86171_F_MAKE(MAX86171_SYS_RESET,         0) |  /* no reset */
         MAX86171_F_MAKE(MAX86171_SYS_SHDN,          1) |  /* start in shutdown */
         MAX86171_F_MAKE(MAX86171_SYS_PPG1_PWRDN,    0) |  /* PPG1 active */
@@ -157,7 +157,10 @@ static const max86171_reg_config_t g_max86171_base_config[] = {
         MAX86171_F_MAKE(MAX86171_SYS_SW_FORCE_SYNC, 0) |  /* no forced sync */
         MAX86171_F_MAKE(MAX86171_SYS_MEAS9_EN,      0)},  /* MEAS9 disabled */
 
-    {MAX86171_REG_SYS_CFG3,     0x00},                              /* defaults */
+    {MAX86171_REG_SYS_CFG3,    /* 0x0E = 0x00 */
+        MAX86171_F_MAKE(MAX86171_SYS_MEAS1_CONFIG_SEL, 0) |  /* unique config per measurement */
+        MAX86171_F_MAKE(MAX86171_SYS_COLLECT_RAW_DATA, 0) |  /* computed data and not raw */
+        MAX86171_F_MAKE(MAX86171_SYS_ALC_DISABLE,      0)},  /* ALC enabled */
 
     {MAX86171_REG_PD_BIAS,                                              /* 0x0F = 0x55 */
         MAX86171_F_MAKE(MAX86171_PD1_BIAS,          1) |  /* PD1 bias = 65pF */
@@ -193,15 +196,15 @@ static const max86171_reg_config_t g_max86171_base_config[] = {
 
     // Threshold Configuration
     {MAX86171_REG_THRESH_MEAS_SEL,  0x00},  /* threshold on MEAS1 */
-    {MAX86171_REG_THRESH_HYST,          0x00},  /* no hysteresis */
-    {MAX86171_REG_THRESH1_HI,             0xFF},  /* HI threshold 1 = max */
-    {MAX86171_REG_THRESH1_LO,            0x00},  /* LO threshold 1 = min */
-    {MAX86171_REG_THRESH2_HI,             0xFF},  /* HI threshold 2 = max */
-    {MAX86171_REG_THRESH2_LO,            0x00},  /* LO threshold 2 = min */
+    {MAX86171_REG_THRESH_HYST,      0x00},  /* no hysteresis */
+    {MAX86171_REG_THRESH1_HI,       0xFF},  /* HI threshold 1 = max */
+    {MAX86171_REG_THRESH1_LO,       0x00},  /* LO threshold 1 = min */
+    {MAX86171_REG_THRESH2_HI,       0xFF},  /* HI threshold 2 = max */
+    {MAX86171_REG_THRESH2_LO,       0x00},  /* LO threshold 2 = min */
 
     // Picket Fence
     {MAX86171_REG_PF_MEAS_SEL,      0x00},  /* PF on MEAS1 */
-    {MAX86171_REG_PF_CFG,               0x40},  /* PF enabled, default config */
+    {MAX86171_REG_PF_CFG,           0x40},  /* PF enabled, default config */
 
     // Interrupt Configuration
     {MAX86171_REG_INT1_EN1,     /* 0x78 = 0x80 */
@@ -273,7 +276,7 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
     {MAX86171_REG_MEAS1_CFG2,
         MAX86171_F_MAKE(MAX86171_MEAS_PPG1_ADC_RGE, 2) | /* PPG1 ADC full range = 16uA */
         MAX86171_F_MAKE(MAX86171_MEAS_PPG2_ADC_RGE, 2) | /* PPG2 ADC full range = 16uA */
-        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      3) | /* LED full scale range 128 mA */
+        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      0) | /* LED full scale range 32 mA */
         MAX86171_F_MAKE(MAX86171_MEAS_FILT_SEL,     0) | /* Ambient light estimation by CDM (Central Difference Method) */
         MAX86171_F_MAKE(MAX86171_MEAS_SINC3_SEL,    0)}, /* SINC3 filter not used */
 
@@ -284,8 +287,8 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS1_DRVA_PA,   0x00u},  /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS1_DRVB_PA,   0x04u},  /* LED5_DRV ~0.12mA    */
-    {MAX86171_REG_MEAS1_DRVC_PA,   0x04u},  /* LED1_DRV ~0.12mA    */
+    {MAX86171_REG_MEAS1_DRVB_PA,   0x01u},  /* LED5_DRV ~0.12mA    */
+    {MAX86171_REG_MEAS1_DRVC_PA,   0x01u},  /* LED1_DRV ~0.12mA    */
 },
 
 // MEAS2 [1] — 536nm Green CT (center)
@@ -305,7 +308,7 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
     {MAX86171_REG_MEAS2_CFG2,
         MAX86171_F_MAKE(MAX86171_MEAS_PPG1_ADC_RGE, 2) | /* PPG1 ADC full range = 16uA */
         MAX86171_F_MAKE(MAX86171_MEAS_PPG2_ADC_RGE, 2) | /* PPG2 ADC full range = 16uA */
-        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      3) | /* LED full scale range 128 mA */
+        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      0) | /* LED full scale range 32 mA */
         MAX86171_F_MAKE(MAX86171_MEAS_FILT_SEL,     0) | /* Ambient light estimation by CDM (Central Difference Method) */
         MAX86171_F_MAKE(MAX86171_MEAS_SINC3_SEL,    0)}, /* SINC3 filter not used */
 
@@ -316,8 +319,8 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
         {MAX86171_REG_MEAS2_DRVA_PA,   0x00u},  /* LED1_DRV disabled   */
-        {MAX86171_REG_MEAS2_DRVB_PA,   0x04u},  /* LED5_DRV ~0.12mA    */
-        {MAX86171_REG_MEAS2_DRVC_PA,   0x04u},  /* LED1_DRV ~0.12mA    */
+        {MAX86171_REG_MEAS2_DRVB_PA,   0x01u},  /* LED5_DRV ~0.12mA    */
+        {MAX86171_REG_MEAS2_DRVC_PA,   0x01u},  /* LED1_DRV ~0.12mA    */
 },
 
 // MEAS3 [2] — 950nm IR
@@ -337,7 +340,7 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
     {MAX86171_REG_MEAS3_CFG2,
         MAX86171_F_MAKE(MAX86171_MEAS_PPG1_ADC_RGE, 2) | /* PPG1 ADC full range = 16uA */
         MAX86171_F_MAKE(MAX86171_MEAS_PPG2_ADC_RGE, 2) | /* PPG2 ADC full range = 16uA */
-        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      3) | /* LED full scale range 128 mA */
+        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      0) | /* LED full scale range 32 mA */
         MAX86171_F_MAKE(MAX86171_MEAS_FILT_SEL,     0) | /* Ambient light estimation by CDM (Central Difference Method) */
         MAX86171_F_MAKE(MAX86171_MEAS_SINC3_SEL,    0)}, /* SINC3 filter not used */
 
@@ -348,8 +351,8 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS3_DRVA_PA,   0x00u},  /* LED7_DRV disabled   */
-    {MAX86171_REG_MEAS3_DRVB_PA,   0x06u},  /* LED3_DRV ~0.24mA    */
-    {MAX86171_REG_MEAS3_DRVC_PA,   0x06u},  /* LED3_DRV ~0.24mA    */
+    {MAX86171_REG_MEAS3_DRVB_PA,   0x00u},  /* LED3_DRV disabled   */
+    {MAX86171_REG_MEAS3_DRVC_PA,   0x00u},  /* LED3_DRV disabled   */
 },
 
 // MEAS4 [3] — 950nm IR
@@ -369,7 +372,7 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
     {MAX86171_REG_MEAS4_CFG2,
         MAX86171_F_MAKE(MAX86171_MEAS_PPG1_ADC_RGE, 2) | /* PPG1 ADC full range = 16uA */
         MAX86171_F_MAKE(MAX86171_MEAS_PPG2_ADC_RGE, 2) | /* PPG2 ADC full range = 16uA */
-        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      3) | /* LED full scale range 128 mA */
+        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      0) | /* LED full scale range 32 mA */
         MAX86171_F_MAKE(MAX86171_MEAS_FILT_SEL,     0) | /* Ambient light estimation by CDM (Central Difference Method) */
         MAX86171_F_MAKE(MAX86171_MEAS_SINC3_SEL,    0)}, /* SINC3 filter not used */
 
@@ -380,8 +383,8 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS4_DRVA_PA,   0x00u},  /* LED7_DRV disabled   */
-    {MAX86171_REG_MEAS4_DRVB_PA,   0x06u},  /* LED3_DRV ~0.24mA    */
-    {MAX86171_REG_MEAS4_DRVC_PA,   0x06u},  /* LED3_DRV ~0.24mA    */
+    {MAX86171_REG_MEAS4_DRVB_PA,   0x00u},  /* LED3_DRV disabled   */
+    {MAX86171_REG_MEAS4_DRVC_PA,   0x00u},  /* LED3_DRV disabled   */
 },
 
 // MEAS5 [4] — 660nm Red
@@ -401,7 +404,7 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
     {MAX86171_REG_MEAS5_CFG2,
         MAX86171_F_MAKE(MAX86171_MEAS_PPG1_ADC_RGE, 2) | /* PPG1 ADC full range = 16uA */
         MAX86171_F_MAKE(MAX86171_MEAS_PPG2_ADC_RGE, 2) | /* PPG2 ADC full range = 16uA */
-        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      3) | /* LED full scale range 128 mA */
+        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      0) | /* LED full scale range 32 mA */
         MAX86171_F_MAKE(MAX86171_MEAS_FILT_SEL,     0) | /* Ambient light estimation by CDM (Central Difference Method) */
         MAX86171_F_MAKE(MAX86171_MEAS_SINC3_SEL,    0)}, /* SINC3 filter not used */
 
@@ -411,9 +414,9 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_LED_SETLNG,   1) | /* Default 12us */
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
-    {MAX86171_REG_MEAS5_DRVA_PA,   0x05u},  /* LED2_DRV ~0.36mA    */
+    {MAX86171_REG_MEAS5_DRVA_PA,   0x01u},  /* LED2_DRV ~0.36mA    */
     {MAX86171_REG_MEAS5_DRVB_PA,   0x00u},  /* LED2_DRV disabled   */
-    {MAX86171_REG_MEAS5_DRVC_PA,   0x05u},  /* LED6_DRV ~0.36mA    */
+    {MAX86171_REG_MEAS5_DRVC_PA,   0x01u},  /* LED6_DRV ~0.36mA    */
 },
 
 // MEAS6 [5] — 660nm Red
@@ -433,7 +436,7 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
     {MAX86171_REG_MEAS6_CFG2,
         MAX86171_F_MAKE(MAX86171_MEAS_PPG1_ADC_RGE, 2) | /* PPG1 ADC full range = 16uA */
         MAX86171_F_MAKE(MAX86171_MEAS_PPG2_ADC_RGE, 2) | /* PPG2 ADC full range = 16uA */
-        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      3) | /* LED full scale range 128 mA */
+        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      0) | /* LED full scale range 32 mA */
         MAX86171_F_MAKE(MAX86171_MEAS_FILT_SEL,     0) | /* Ambient light estimation by CDM (Central Difference Method) */
         MAX86171_F_MAKE(MAX86171_MEAS_SINC3_SEL,    0)}, /* SINC3 filter not used */
 
@@ -443,9 +446,9 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_LED_SETLNG,   1) | /* Default 12us */
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
-    {MAX86171_REG_MEAS6_DRVA_PA,   0x05u},  /* LED2_DRV ~0.36mA    */
+    {MAX86171_REG_MEAS6_DRVA_PA,   0x01u},  /* LED2_DRV ~0.36mA    */
     {MAX86171_REG_MEAS6_DRVB_PA,   0x00u},  /* LED2_DRV disabled   */
-    {MAX86171_REG_MEAS6_DRVC_PA,   0x05u},  /* LED6_DRV ~0.36mA    */
+    {MAX86171_REG_MEAS6_DRVC_PA,   0x01u},  /* LED6_DRV ~0.36mA    */
 },
 
 // MEAS7 [6] — 526nm Green SFH (outer)
@@ -465,7 +468,7 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
     {MAX86171_REG_MEAS7_CFG2,
         MAX86171_F_MAKE(MAX86171_MEAS_PPG1_ADC_RGE, 2) | /* PPG1 ADC full range = 16uA */
         MAX86171_F_MAKE(MAX86171_MEAS_PPG2_ADC_RGE, 2) | /* PPG2 ADC full range = 16uA */
-        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      3) | /* LED full scale range 128 mA */
+        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      0) | /* LED full scale range 32 mA */
         MAX86171_F_MAKE(MAX86171_MEAS_FILT_SEL,     0) | /* Ambient light estimation by CDM (Central Difference Method) */
         MAX86171_F_MAKE(MAX86171_MEAS_SINC3_SEL,    0)}, /* SINC3 filter not used */
 
@@ -476,8 +479,8 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS7_DRVA_PA,   0x00u},  /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS7_DRVB_PA,   0x08u},  /* LED8_DRV ~0.48mA    */
-    {MAX86171_REG_MEAS7_DRVC_PA,   0x08u},  /* LED9_DRV ~0.48mA    */
+    {MAX86171_REG_MEAS7_DRVB_PA,   0x01u},  /* LED8_DRV ~0.48mA    */
+    {MAX86171_REG_MEAS7_DRVC_PA,   0x01u},  /* LED9_DRV ~0.48mA    */
 },
 
 // MEAS8 [7] — 526nm Green SFH (outer)
@@ -497,7 +500,7 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
     {MAX86171_REG_MEAS8_CFG2,
         MAX86171_F_MAKE(MAX86171_MEAS_PPG1_ADC_RGE, 2) | /* PPG1 ADC full range = 16uA */
         MAX86171_F_MAKE(MAX86171_MEAS_PPG2_ADC_RGE, 2) | /* PPG2 ADC full range = 16uA */
-        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      3) | /* LED full scale range 128 mA */
+        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      0) | /* LED full scale range 32 mA */
         MAX86171_F_MAKE(MAX86171_MEAS_FILT_SEL,     0) | /* Ambient light estimation by CDM (Central Difference Method) */
         MAX86171_F_MAKE(MAX86171_MEAS_SINC3_SEL,    0)}, /* SINC3 filter not used */
 
@@ -508,8 +511,8 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS8_DRVA_PA,   0x00u},  /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS8_DRVB_PA,   0x08u},  /* LED8_DRV ~0.48mA    */
-    {MAX86171_REG_MEAS8_DRVC_PA,   0x08u},  /* LED9_DRV ~0.48mA    */
+    {MAX86171_REG_MEAS8_DRVB_PA,   0x01u},  /* LED8_DRV ~0.48mA    */
+    {MAX86171_REG_MEAS8_DRVC_PA,   0x01u},  /* LED9_DRV ~0.48mA    */
 },
 
 // MEAS9 [8] — Ambient (all drivers PA=0)
@@ -530,7 +533,7 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
     {MAX86171_REG_MEAS9_CFG2,
         MAX86171_F_MAKE(MAX86171_MEAS_PPG1_ADC_RGE, 2) | /* PPG1 ADC full range = 16uA */
         MAX86171_F_MAKE(MAX86171_MEAS_PPG2_ADC_RGE, 2) | /* PPG2 ADC full range = 16uA */
-        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      3) | /* LED full scale range 128 mA */
+        MAX86171_F_MAKE(MAX86171_MEAS_LED_RGE,      0) | /* LED full scale range 32 mA */
         MAX86171_F_MAKE(MAX86171_MEAS_FILT_SEL,     0) | /* Ambient light estimation by CDM (Central Difference Method) */
         MAX86171_F_MAKE(MAX86171_MEAS_SINC3_SEL,    0)}, /* SINC3 filter not used */
 

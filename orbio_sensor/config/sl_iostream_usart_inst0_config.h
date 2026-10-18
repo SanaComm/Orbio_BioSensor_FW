@@ -75,7 +75,7 @@
 // <q SL_IOSTREAM_USART_INST0_RESTRICT_ENERGY_MODE_TO_ALLOW_RECEPTION> Restrict the energy mode to allow the reception.
 // <i> Default: 1
 // <i> Limits the lowest energy mode the system can sleep to in order to keep the reception on. May cause higher power consumption.
-#define SL_IOSTREAM_USART_INST0_RESTRICT_ENERGY_MODE_TO_ALLOW_RECEPTION    0
+#define SL_IOSTREAM_USART_INST0_RESTRICT_ENERGY_MODE_TO_ALLOW_RECEPTION    1
 
 // </h>
 

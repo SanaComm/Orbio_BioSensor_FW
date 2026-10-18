@@ -207,6 +207,16 @@ static inline uint8_t max86171_f_write(uint8_t regv, uint8_t mask, uint8_t val_s
 #define MAX86171_SYS_MEAS8_EN_M         (0x1u)
 
 /* =============================
+ *  System Configuration 3 (0x0E) - Page 55-56
+ * ============================= */
+#define MAX86171_SYS_MEAS1_CONFIG_SEL_S (0u)
+#define MAX86171_SYS_MEAS1_CONFIG_SEL_M (0x1u)
+#define MAX86171_SYS_COLLECT_RAW_DATA_S (1u)
+#define MAX86171_SYS_COLLECT_RAW_DATA_M (0x1u)
+#define MAX86171_SYS_ALC_DISABLE_S      (4u)
+#define MAX86171_SYS_ALC_DISABLE_M      (0x1u)
+
+/* =============================
  *  FIFO Configuration 2 (0x0A) - Page 52-53
  *  Bugfix: Shift offsets corrected. They were off by 1 bit each.
  * ============================= */

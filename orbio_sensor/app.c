@@ -44,7 +44,7 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (27)
+#define VERSION (28)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -89,10 +89,6 @@ static const char *getModuleName(app_module_t module)
     return moduleNames[__builtin_ctz(module)];
 }
 
-// TODO: What if a module is stopped from CLI or BLE, and there is a timer/interrupt that just triggers
-// TODO: Current handleNewPacket does not work if two or more packet types have to be interspersed
-// TODO: VBAT_ADC periodic read and battery status check
-
 /**************************************************************************************************
     Sleep/Wake States Defines and Variables.
 **************************************************************************************************/
@@ -113,15 +109,12 @@ uint8_t pll_gain;
 uint8_t sync_mode;
 uint32_t frequency_to_set_khz;
 bool samples_print_enabled;
-#ifdef USE_CAL_SWEEP
-bool run_cal_offsets;
-#endif
 uint8_t lnagain, vgagain;
 #define SWEEP_INTERVAL_DEFAULT_SEC (10 * 60)
 #define ACTIVE_TIME_DEFAULT_SEC (0)
 static uint16_t sweep_interval_sec;
 static uint16_t active_time_sec;
-static char reportsettings[60];
+static char reportsettings[70];
 // Device name to advertise
 static uint8_t devicename[] = {'O', 'r', 'b', 'i', 'o', '-', 0, 0, 0, 0, 0, 0, 0};
 
@@ -130,6 +123,29 @@ static uint8_t devicename[] = {'O', 'r', 'b', 'i', 'o', '-', 0, 0, 0, 0, 0, 0, 0
 **************************************************************************************************/
 
 static max86171_t max86171_dev;
+
+/**************************************************************************************************
+    Battery Level Defines, Variables and Function
+**************************************************************************************************/
+// Maximum battery level
+#define MAX_BATTERY_LEVEL_MV (4200)
+#define MIN_BATTERY_LEVEL_MV (3600)
+#define BATTERY_RANGE_MV (MAX_BATTERY_LEVEL_MV - MIN_BATTERY_LEVEL_MV)
+#define BATTERYPERCENTAGE(x) (((x - MIN_BATTERY_LEVEL_MV) * 100) / BATTERY_RANGE_MV)
+// Assume 3.8V level for operation
+#define BATTERY_GOOD_THRESHOLD BATTERYPERCENTAGE(3800)
+static uint8_t batteryLevel = 100;
+
+static void getBatteryLevel (void)
+{
+    // Read IADC
+    uint16_t mV = doIADCBattery ();
+    // Limit to with valid range
+    if (mV > MAX_BATTERY_LEVEL_MV) mV = MAX_BATTERY_LEVEL_MV;
+    if (mV < MIN_BATTERY_LEVEL_MV) mV = MIN_BATTERY_LEVEL_MV;
+    // Express level as a percentage of the range
+    batteryLevel = BATTERYPERCENTAGE(mV);
+}
 
 /**************************************************************************************************
     Sweep States Defines and Variables.
@@ -146,6 +162,12 @@ typedef enum
     SWEEP_STATE_NONE,
 } sweep_state_t;
 static sweep_state_t sweepState;
+
+// Set by dostopsweep() when the user (CLI/BLE), a BLE disconnect or the
+// inactivity timeout asks the sweep to stop. SWEEP_STATE_END uses it to tell a
+// "stopped on request" end apart from a "finished normally" end.
+// This replaces the role that active_module = 0 played in dostopsweep().
+static bool sweepStopRequested;
 
 // To keep track of when the sweeps started, to timeout after 30seconds
 static uint32_t blestarttime, starttime;
@@ -179,10 +201,12 @@ static void timer_cb_startsweep (sl_sleeptimer_timer_handle_t *handle, void *dat
     triggerSweep ();
 }
 
-// Sends a signal to the event handler to start a sweep
-// Called 1) When timer callback is called when waking from sleep or CLI/BLE command to start a sweep
-//        2) When handleNewPacket either send a sweep in a single packet or connection is not open
-//        3) When app_process_action calls sendNextChunk and the whole sweep has been sent or too many errors
+// Sends a signal to the event handler to start or continue a sweep. Called when:
+//        1) Timer callback is called when waking from sleep or CLI/BLE command to start a sweep
+//        2) handleNewPacket either sends sweep data in a single packet or connection is not open, move to the next sweep
+//        3) app_process_action calls sendNextChunk and the whole sweep has been sent or too many errors
+//        4) User inputs a key to stop the sweep, to trigger into END and cleanup
+//        5) Sweep end time is reached, to trigger into END and cleanup
 static void triggerSweep (void)
 {
     // Trigger sweep activity, making sure to retry if the signal did not work due to resource issue
@@ -192,6 +216,14 @@ static void triggerSweep (void)
         sl_sleeptimer_stop_timer (&timer_startsweep);
         sl_sleeptimer_start_timer_ms (&timer_startsweep, 10, timer_cb_startsweep, NULL, 0, 0);
     }
+}
+
+// Called to wait till bytesRemaining becomes 0 and it's okay to call handleNewPacket
+static void pollSweep (void)
+{
+    // Start timer to check after a delay, say 5msec, instead of triggering it immediately
+    sl_sleeptimer_stop_timer (&timer_startsweep);
+    sl_sleeptimer_start_timer_ms (&timer_startsweep, 5, timer_cb_startsweep, NULL, 0, 0);
 }
 
 // This timer will fire when sleep is over
@@ -225,6 +257,9 @@ static sl_sleeptimer_timer_handle_t timer_inactivity;
 // It is reset periodically if BLE connection is open or Accel detects movement
 // else it increments periodically
 static uint16_t inactivity_counter;
+// How often to read battery
+#define BATTERY_READ_PERIOD (30)
+static uint32_t battery_read_counter;
 
 // This timer will fire every 1 second and increment a counter
 // Note: this is called from a timer tick ISR context so needs to be compact
@@ -252,6 +287,12 @@ static void timer_cb_inactivity (sl_sleeptimer_timer_handle_t *handle, void *dat
             inactivity_counter = 0;
         else
             inactivity_counter++;
+    }
+    if (++battery_read_counter == BATTERY_READ_PERIOD)
+    {
+        battery_read_counter = 0;
+        // Only read battery when idling
+        if (active_module == 0) getBatteryLevel ();
     }
 }
 
@@ -530,7 +571,10 @@ static bool sendChunk (void)
                 errtime = 0;
                 PRINT_ERROR ("ERROR: sendChunk retry count for error 0x%lx limit reached, drop chunk and continue!\n\r", status);
             }
-            errtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+            else
+            {
+                errtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+            }
         }
         else
         {
@@ -578,6 +622,7 @@ static bool sendChunk (void)
 
 // Will be called in app_process_action to send the next pending chunk
 // and also acts as a retry mechanism
+static void sendAccelPacket (void);
 static void sendNextChunk (void)
 {
     // To keep transferring pending packets via notifications
@@ -587,7 +632,11 @@ static void sendNextChunk (void)
         // Trigger next sweep as data was fully sent or failure
         // was retried enough times
         if ((ret == true) && (active_module == ACTIVE_MODULE_SWEEP))
+        {
+            // Send Accel data alongside Sweep
+            sendAccelPacket ();
             triggerSweep ();
+        }
     }
 }
 
@@ -596,57 +645,48 @@ static void sendNextChunk (void)
 static uint8_t resultArraySend[HEADER_SIZE + sizeof(RESULT_TYPE) * RESULT_SIZE * NUM_INPUTS];
 
 // Call this when a new packet is ready to send e.g. when one sweep of data is
-// collected, or PPG has collected one frame of measurements.
+// collected, or PPG has collected one frame of measurements, Accel has 1 second of data to send.
+// If Accel data is to be sent alongside Sweep or PPG, it will be sent as an extra packet after
+// the Sweep or PPG data.
 static bool handleNewPacket (app_module_t source, uint8_t *dataSource, uint16_t dataSourceLen)
 {
-    // True if packet was fully sent or connection not opened or previous data not fully sent
+    // True if packet was fully sent or connection not opened, either way the next packet can be sent.
     // False if packet partially sent or send failure which needs retry i.e. send is ongoing
-    // Note: The bool return value is overloaded and bytesRemaining is used to distinguish
-    // some cases
-    bool ret = true;
+    if (bytesRemaining)
+    {
+        PRINT_ERROR ("ERROR: handleNewPacket cannot be called with non-zero bytesRemaining %d!\n\r", bytesRemaining);
+        return true;
+    }
     if (!dataSource || (dataSourceLen > ((int)sizeof(resultArraySend) - HEADER_SIZE)))
     {
         PRINT_ERROR ("ERROR: handleNewPacket source address %p or source length %d\n\r", dataSource, dataSourceLen);
-        bytesRemaining = 0;
+        return true;
     }
-    // Send data if transfer is enabled
-    else if ((transferEnabled == true) && (sendNotification == true))
-    {
-        if (bytesRemaining == 0)
-        {
-            // At the start of a sweep send a syncword, packet type and timestamp
-            resultArraySend[0] = 0xAA;
-            resultArraySend[1] = 0xBB;
-            resultArraySend[2] = 0xCC;
-            // Insert packet type
-            resultArraySend[3] = __builtin_ctz(source);
-            // Insert timestamp
-            uint32_t nowtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
-            for (size_t k = 0; k < sizeof(uint32_t); k++)
-                resultArraySend[4 + k] = (nowtime >> (24 - k * 8)) & 0xFF;
-            // Insert packet byte count (not including fixed header size)
-            resultArraySend[8] = (dataSourceLen >> 8) & 0xFF;
-            resultArraySend[9] = dataSourceLen & 0xFF;
-            // As dataSource will come into use when adding a new packet, make a local copy for TX
-            memcpy (resultArraySend + HEADER_SIZE, dataSource, dataSourceLen);
-            sendData = resultArraySend;
-            sendTotalDataLen = HEADER_SIZE + dataSourceLen;
-            bytesRemaining = sendTotalDataLen;
-            sendchunkretrycount = 0;
-            errtime = 0;
-            ret = sendChunk ();
-        }
-        else
-        {
-            // Should not form the new data in resultArraySend, instead wait till the previous
-            // data is fully sent.
-        }
-    }
-    else
-    {
-        // Can't send so reset
-        bytesRemaining = 0;
-    }
+    // Send data only if transfer is enabled
+    if ((transferEnabled != true) || (sendNotification != true))
+        return true;
+
+    // At the start of a sweep send a syncword, packet type and timestamp
+    resultArraySend[0] = 0xAA;
+    resultArraySend[1] = 0xBB;
+    resultArraySend[2] = 0xCC;
+    // Insert packet type
+    resultArraySend[3] = __builtin_ctz(source);
+    // Insert timestamp
+    uint32_t nowtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+    for (size_t k = 0; k < sizeof(uint32_t); k++)
+        resultArraySend[4 + k] = (nowtime >> (24 - k * 8)) & 0xFF;
+    // Insert packet byte count (not including fixed header size)
+    resultArraySend[8] = (dataSourceLen >> 8) & 0xFF;
+    resultArraySend[9] = dataSourceLen & 0xFF;
+    // As dataSource will come into use when adding a new packet, make a local copy for TX
+    memcpy (resultArraySend + HEADER_SIZE, dataSource, dataSourceLen);
+    sendData = resultArraySend;
+    sendTotalDataLen = HEADER_SIZE + dataSourceLen;
+    bytesRemaining = sendTotalDataLen;
+    sendchunkretrycount = 0;
+    errtime = 0;
+    bool ret = sendChunk ();
     return ret;
 }
 
@@ -805,6 +845,7 @@ void EMU_EFPEM23PostsleepHook (void)
 static void unsetLowPowerMode (void)
 {
     sleepState = SLEEP_STATE_WAKE;
+    battery_read_counter = 0;
     // Enable required pins
     BOARD_pins_init ();
     // Needed for CLI to function
@@ -828,7 +869,12 @@ static void unsetLowPowerMode (void)
 // Accel is not powered off as it is needed for wakeup
 static void setLowPowerMode (void)
 {
-    sweepState = SWEEP_STATE_INIT;
+    // SWEEP TODO: If a stop is pending (inactivity timeout stopped an active sweep just
+    // before calling us), keep END so the pending trigger ends the sweep. END sets INIT
+    // itself afterwards. Otherwise the pending trigger would run INIT and restart the
+    // sweep, waking the device straight out of low power mode.
+    if (sweepStopRequested == false)
+        sweepState = SWEEP_STATE_INIT;
     sleepState = SLEEP_STATE_SLEEP;
 #ifdef USE_BLE
     // Close the BLE connection if open
@@ -945,20 +991,17 @@ static void startLedTimer (void)
 static void stopLedTimer (void)
 {
 #ifdef USE_BLE
+    // Disable LED if not used by any module nor BLE
     if ((OpenedConnectionHandle == SL_BT_INVALID_CONNECTION_HANDLE) && (active_module == 0))
 #else
+    // Disable LED if not used by any module
     if (active_module == 0)
 #endif
     {
-        PRINT_INFO ("sLT %d\n\r", active_module);
         // Stop the timer
         sl_sleeptimer_stop_timer (&timer_led);
         // Disable display LEDs
         disableI2CLED ();
-    }
-    else
-    {
-        PRINT_INFO ("No sLT %d\n\r", active_module);
     }
     return;
 }
@@ -966,8 +1009,64 @@ static void stopLedTimer (void)
 static void stop_module (void)
 {
     active_module = 0;
+    battery_read_counter = 0;
     // Stop LED timer
     stopLedTimer ();
+}
+
+/**************************************************************************//**
+ * Accel functions
+ *****************************************************************************/
+
+#define NUM_BYTES_PER_ACCEL_SAMPLE (6)
+#ifdef USE_25Hz
+#define NUM_ACCEL_SAMPLES_PER_SEC (25)
+#elif defined(USE_10Hz)
+#define NUM_ACCEL_SAMPLES_PER_SEC (10)
+#elif defined(USE_1Hz)
+#define NUM_ACCEL_SAMPLES_PER_SEC (1)
+#endif
+
+// Have a little space for extra samples in case of timing jitter
+#define NUM_ACCEL_SAMPLES_TO_READ (NUM_ACCEL_SAMPLES_PER_SEC + 2)
+static uint8_t resultArrayAccel[NUM_BYTES_PER_ACCEL_SAMPLE * NUM_ACCEL_SAMPLES_TO_READ];
+
+// Read Accel samples from FIFO
+static int read_accel_fifo (void)
+{
+    // Get number of available Accel X+Y+Z samples
+    int num = accelGetNumData ();
+    // Limit to available storage
+    if (num > NUM_ACCEL_SAMPLES_TO_READ) num = NUM_ACCEL_SAMPLES_TO_READ;
+    // Read Accel FIFO
+    uint8_t *ptr = resultArrayAccel;
+    for (int k = 0; k < num; k++)
+    {
+        // Get one sample of Accel data (X+Y+Z) into BLE buffer
+        accelGetData (ptr);
+#define MAKE_INT16(x,y) ((int16_t)(((uint16_t)y << 8) | x))
+        if (samples_print_enabled == true)
+        {
+            PRINT_INFO ("%d,%d,%d\n\r", MAKE_INT16(*ptr, *(ptr + 1)), MAKE_INT16(*(ptr + 2), *(ptr + 3)), MAKE_INT16(*(ptr + 4), *(ptr + 5)));
+        }
+        ptr += NUM_BYTES_PER_ACCEL_SAMPLE;
+    }
+    return num;
+}
+
+// Send as much Accel data as available in a packet, alongside active mode
+static void sendAccelPacket (void)
+{
+#ifdef USE_BLE
+    // Previous packet still in flight, leave samples in the FIFO for next time
+    if (bytesRemaining != 0) return;
+#endif
+    int num = read_accel_fifo ();
+#ifdef USE_BLE
+    // No need to send empty packets
+    if (num == 0) return;
+    handleNewPacket (ACTIVE_MODULE_ACCEL, (uint8_t *)resultArrayAccel, num * NUM_BYTES_PER_ACCEL_SAMPLE);
+#endif
 }
 
 #ifdef USE_PPG
@@ -1253,51 +1352,15 @@ static void parse_ppg_fifo (void)
         resultArrayPPG[resultIndex++] = (sample_for_ble >> 0) & 0xFF;
     }
 #ifdef USE_BLE
+    // Return value is ignored as it's a single chunk after collecting a frame
+    // so to keep things simple, it is assumed to have gone through
     handleNewPacket (ACTIVE_MODULE_PPG, (uint8_t *)resultArrayPPG, resultIndex);
 #endif
+    // Send Accel data alongside PPG
+    sendAccelPacket ();
 }
 
 #endif
-
-/**************************************************************************//**
- * Accel functions
- *****************************************************************************/
-
-#define NUM_BYTES_PER_ACCEL_SAMPLE (6)
-#ifdef USE_25Hz
-#define NUM_ACCEL_SAMPLES_PER_SEC (25)
-#elif defined(USE_10Hz)
-#define NUM_ACCEL_SAMPLES_PER_SEC (10)
-#elif defined(USE_1Hz)
-#define NUM_ACCEL_SAMPLES_PER_SEC (1)
-#endif
-
-// Have a little space for extra samples in case of timing jitter
-#define NUM_ACCEL_SAMPLES_TO_READ (NUM_ACCEL_SAMPLES_PER_SEC + 2)
-static uint8_t resultArrayAccel[NUM_BYTES_PER_ACCEL_SAMPLE * NUM_ACCEL_SAMPLES_TO_READ];
-
-// Read Accel samples from FIFO
-static int read_accel_fifo (void)
-{
-    // Get number of available Accel X+Y+Z samples
-    int num = accelGetNumData ();
-    // Limit to available storage
-    if (num > NUM_ACCEL_SAMPLES_TO_READ) num = NUM_ACCEL_SAMPLES_TO_READ;
-    // Read Accel FIFO
-    uint8_t *ptr = resultArrayAccel;
-    for (int k = 0; k < num; k++)
-    {
-        // Get one sample of Accel data (X+Y+Z) into BLE buffer
-        accelGetData (ptr);
-#define MAKE_INT16(x,y) ((int16_t)(((uint16_t)y << 8) | x))
-        if (samples_print_enabled == true)
-        {
-            PRINT_INFO ("%d,%d,%d\n\r", MAKE_INT16(*ptr, *(ptr + 1)), MAKE_INT16(*(ptr + 2), *(ptr + 3)), MAKE_INT16(*(ptr + 4), *(ptr + 5)));
-        }
-        ptr += NUM_BYTES_PER_ACCEL_SAMPLE;
-    }
-    return num;
-}
 
 /**************************************************************************//**
  * Sweep related
@@ -1384,19 +1447,10 @@ void pack_into_20(int32_t *array, int number_of_data_words)
 #endif
 
 static uint32_t last_set_frequency;
-
-int i_avg_mV[NUM_FREQS], q_avg_mV[NUM_FREQS];
-int i_avg_sum[NUM_FREQS][NUM_CAL_SWEEPS], q_avg_sum[NUM_FREQS][NUM_CAL_SWEEPS];
-
-void clearIQOffsets (void)
-{
-    memset (i_avg_mV, 0, sizeof (i_avg_mV));
-    memset (q_avg_mV, 0, sizeof (q_avg_mV));
-}
+static int sweep_data_size;
 
 static void run_sweep_statemachine (void)
 {
-    int sweep_data_size = 0;
     switch (sweepState)
     {
         case SWEEP_STATE_INIT:
@@ -1437,18 +1491,8 @@ static void run_sweep_statemachine (void)
         resetCMX994 ();
         enableCMX994 ();
         initIADC();
-        // Continue with sweep
-        if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
-        {
-            PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal INIT\n\r");
-        }
-#ifdef USE_CAL_SWEEP
-        if (run_cal_offsets == true)
-        {
-            // Clear before running cal sweeps
-            clearIQOffsets ();
-        }
-#endif
+        // Start the sweep
+        triggerSweep ();
         }
         break;
 
@@ -1462,15 +1506,11 @@ static void run_sweep_statemachine (void)
         {
             doOneSweep (sweepcount);
             sweepcount++;
-#ifdef USE_CAL_SWEEP
-            if ((userinput == true) || (active_module == 0) || ((run_cal_offsets == true) && (sweepcount == NUM_CAL_SWEEPS)))
-#else
-            if ((userinput == true) || (active_module == 0))
-#endif
+            if (userinput == true)
             {
-                PRINT_INFO ("Break from sweep\n\r");
+                PRINT_INFO ("Break from sweep, user entered a key!\n\r");
                 sweepState = SWEEP_STATE_END;
-                // Finish up sweep
+                // Finish up sweep due to user break
                 triggerSweep ();
                 break;
             }
@@ -1483,18 +1523,19 @@ static void run_sweep_statemachine (void)
             // Update size of BLE data after packing into bytes
             sweep_data_size = (number_of_data_words * IQPRECISION) / 8;
 #endif
-            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sweep_data_size);
-            // Trigger next sweep as data was fully sent in a single packet, or connection is not open
-            if (ret == true && bytesRemaining == 0)
-            {
-                // Continue sweep
-                triggerSweep ();
-            }
             // Previous bytes not sent yet so wait in a new state
-            else if (ret == true && bytesRemaining != 0)
+            if (bytesRemaining != 0)
             {
                 sweepState = SWEEP_STATE_PENDING;
-                // Trigger to check if all bytes sent
+                // Wait a little and check again
+                pollSweep ();
+                break;
+            }
+            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sweep_data_size);
+            // Trigger next sweep as data was fully sent in a single packet, or connection is not open
+            if (ret == true)
+            {
+                // Continue sweep
                 triggerSweep ();
             }
             else
@@ -1515,21 +1556,26 @@ static void run_sweep_statemachine (void)
         }
         break;
 
+#ifdef USE_BLE
         // This state is transitory and so the sweep time and user
         // input checks to break from active sweep are not added here.
         case SWEEP_STATE_PENDING:
         {
-            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sweep_data_size);
-            // Trigger next sweep as data was fully sent in a single packet, or connection is not open
-            if (ret == true && bytesRemaining == 0)
+            PRINT_INFO ("P");
+            // Check if it's okay to send a new packet
+            if (bytesRemaining != 0)
             {
-                sweepState = SWEEP_STATE_SWEEP;
-                triggerSweep ();
+                // Wait a little and check again
+                pollSweep ();
+                break;
             }
-            // Previous bytes not sent yet so wait in this state
-            else if (ret == true && bytesRemaining != 0)
+            // Cancel any stale poll timer
+            sl_sleeptimer_stop_timer (&timer_startsweep);
+            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sweep_data_size);
+            sweepState = SWEEP_STATE_SWEEP;
+            // Trigger next sweep as data was fully sent in a single packet, or connection is not open
+            if (ret == true)
             {
-                // Check after a while if still pending
                 triggerSweep ();
             }
             else
@@ -1538,6 +1584,7 @@ static void run_sweep_statemachine (void)
             }
         }
         break;
+#endif
 
         case SWEEP_STATE_SETFREQ:
         {
@@ -1581,14 +1628,6 @@ static void run_sweep_statemachine (void)
                     frequency_to_set_khz = END_FREQ_KHZ - FREQ_STEP_KHZ;
                 last_set_frequency = 0;
             }
-            if (active_module == 0)
-            {
-                // Finish up sweep
-                sweepState = SWEEP_STATE_END;
-                // Set this only when commanded to stop and not when going to sleep
-                frequency_to_set_khz = 0;
-                last_set_frequency = 0;
-            }
             // Continue
             triggerSweep ();
         }
@@ -1612,7 +1651,8 @@ static void run_sweep_statemachine (void)
         sl_sleeptimer_stop_timer (&timer_startsweep);
 #ifdef USE_SLEEP_WAKE
         // Check if Sweep should continue
-        if (active_module == ACTIVE_MODULE_SWEEP)
+        // Do not re-arm the wake timer if a stop was requested
+        if ((active_module == ACTIVE_MODULE_SWEEP) && (sweepStopRequested == false))
         {
             // Start timer to sleep till next sweep
             sl_sleeptimer_start_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
@@ -1621,21 +1661,25 @@ static void run_sweep_statemachine (void)
         else
 #endif
         {
+            // Set this only when commanded to stop and not when going to sleep
+            frequency_to_set_khz = 0;
             PRINT_INFO ("Sweep has been stopped\n\r");
         }
-#ifdef USE_CAL_SWEEP
-        if (run_cal_offsets == true)
+        // stop was requested, so consume the request. Leave the state ready for
+        // the next start / wake (setLowPowerMode used to do this but is now prevented
+        // from overwriting END).
+        if (sweepStopRequested == true)
         {
-            // Calculate clusters after running all cal sweeps
-            for (int i = 0; i < NUM_FREQS; i++)
-            {
-                int icent0, icent1, qcent0, qcent1;
-                two_means_2D(&i_avg_sum[i][0], &q_avg_sum[i][0], NUM_CAL_SWEEPS, &icent0, &qcent0, &icent1, &qcent1);
-                PRINT_INFO ("Freq index %d, <IQ1:%d, %d>, <IQ2:%d, %d>\n\r", i, icent0, qcent0, icent1, qcent1);
-            }
-            run_cal_offsets = false;
+            sweepStopRequested = false;
+            sweepState = SWEEP_STATE_INIT;
         }
+#ifdef USE_BLE
+        bytesRemaining = 0;
 #endif
+        // Shut off RF ICs as they consume a lot of current
+        shutoffRFICs ();
+        // IADC no longer needed so disable it as well
+        disableIADC ();
         stop_module ();
         }
         break;
@@ -1731,6 +1775,7 @@ static void dosetsweeptiming (int temp1, int temp2)
     }
 }
 
+// Called from dosetfreq which is called via CLI/BLE
 static void dosweep (void)
 {
     if (active_module)
@@ -1738,6 +1783,8 @@ static void dosweep (void)
         PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
         return;
     }
+    // A new start cancels any stale stop request
+    sweepStopRequested = false;
     sweepState = SWEEP_STATE_INIT;
     // Start timer to run sweeps after a delay
     sl_sleeptimer_stop_timer (&timer_startsweep);
@@ -1760,7 +1807,13 @@ static void dosetfreq (uint16_t temp)
 }
 
 // Actual stopping will be done inside the Sweep state machine if sweeping.
-// If in sleep state, it is enough to stop the wake timer.
+// SWEEP TODO: this function now always (a) cancels the wake/retry timer, (b) records
+// the request in sweepStopRequested and (c) triggers the state machine, so END runs
+// exactly once whatever state the sweep was in:
+//   - mid-sweep with the chain alive: the trigger just coalesces with the pending one
+//   - parked waiting for sendNextChunk (e.g. BLE disconnected mid-packet): the trigger
+//     is the only thing that will ever run END
+//   - waiting for the next wake timer: timer is cancelled so it cannot restart later
 static void dostopsweep (void)
 {
     bool is_running = false;
@@ -1771,19 +1824,16 @@ static void dostopsweep (void)
         return;
     }
     PRINT_INFO ("stop_sweep\n\r");
-#ifdef USE_SLEEP_WAKE
-    // In case sweep was active and in sleep
-    if ((is_running == true) && (sleepState == SLEEP_STATE_SLEEP))
-    {
-        // Stop timer to wake and do sweep
-        sl_sleeptimer_stop_timer (&timer_startsweep);
-    }
-#endif
-    // TODO: How did active_module = 0; work in v25
+    // Stop timer to wake and do sweep
+    sl_sleeptimer_stop_timer (&timer_startsweep);
+    sweepStopRequested = true;
+    // This state is used to stop the sweep
     sweepState = SWEEP_STATE_END;
-    // TODO: Trigger to end the sweep. Seems logical, but what is the situation?
-    if (is_running == false)
-        triggerSweep ();
+    // Trigger to cleanup the sweep. This is needed because of various conditions
+    // like BLE connection closed or notifications turned off, which leaves the sweep
+    // hanging mid-packet as it is split into many chunks. notificationTransferInProgress
+    // will return false for example.
+    triggerSweep ();
 }
 
 #ifdef USE_PPG
@@ -1996,6 +2046,7 @@ static void processblesetting (char *payload, int len)
     switch (temp0)
     {
         case CMD_SWEEP_START:
+        frequency_to_set_khz = 0;
         dosweep ();
         break;
 
@@ -2022,13 +2073,6 @@ static void processblesetting (char *payload, int len)
             PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
         }
         break;
-
-#ifdef USE_CAL_SWEEP
-        case CMD_SWEEP_RUN_CAL_OFFSETS:
-        run_cal_offsets = true;
-        dosweep ();
-        break;
-#endif
 
         case CMD_SWEEP_SET_LNA_VGA_GAIN:
         // Make sure we did receive these fields
@@ -2145,17 +2189,15 @@ SL_WEAK void app_init(void)
     sync_mode = 0;
     frequency_to_set_khz = 0;
     samples_print_enabled = false;
-#ifdef USE_CAL_SWEEP
-    run_cal_offsets = false;
-#endif
     lnagain = 0;
     vgagain = CMX994_MAX_VGA_GAIN;
-    clearIQOffsets ();
     sweep_interval_sec = SWEEP_INTERVAL_DEFAULT_SEC;
     active_time_sec = ACTIVE_TIME_DEFAULT_SEC;
     sweepState = SWEEP_STATE_INIT;
     sleepState = SLEEP_STATE_WAKE;
     active_module = ACTIVE_MODULE_NONE;
+    inactivity_counter = 0;
+    battery_read_counter = 0;
     // Setup Accel and PPG interrupts
     setup_interrupts ();
 #ifdef USE_BLE
@@ -2350,10 +2392,8 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       // Accel data rate: 25 Hz, 3 axes, 2 bytes per axis = 150 bytes per second data
       if (evt->data.evt_system_external_signal.extsignals & SIGNAL_ACCEL)
       {
-          int num = read_accel_fifo ();
-#ifdef USE_BLE
-          handleNewPacket (ACTIVE_MODULE_ACCEL, (uint8_t *)resultArrayAccel, num * NUM_BYTES_PER_ACCEL_SAMPLE);
-#endif
+          // Send Accel data
+          sendAccelPacket ();
           sl_sleeptimer_stop_timer (&timer_readaccel);
           // Check if Accel should continue
           if (active_module == ACTIVE_MODULE_ACCEL)
@@ -2431,7 +2471,9 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
         else if (evt->data.evt_gatt_server_user_read_request.characteristic == gattdb_report_parameters) {
           PRINT_INFO ("Got report settings from BLE client\n\r");
           memset (reportsettings, 0, sizeof (reportsettings));
-          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d,%d,%d,%d", IQPRECISION, pll_gain, lnagain, vgagain, active_time_sec, sweep_interval_sec);
+          // Get fresh battery reading to report but only if idling
+          if (active_module == 0) getBatteryLevel ();
+          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d,%d,%d,%d,%d", IQPRECISION, pll_gain, lnagain, vgagain, active_time_sec, sweep_interval_sec, batteryLevel);
           /* Send response to Read Request */
           sl_bt_gatt_server_send_user_read_response(
             evt->data.evt_gatt_server_user_read_request.connection,
@@ -2535,6 +2577,7 @@ void cli_set_ppg_agc(sl_cli_command_arg_t *arguments)
 void cli_dosweep(sl_cli_command_arg_t *arguments)
 {
     (void)arguments;
+    frequency_to_set_khz = 0;
     dosweep ();
 }
 
@@ -2567,15 +2610,6 @@ void cli_set_freq(sl_cli_command_arg_t *arguments)
     }
     uint16_t temp = sl_cli_get_argument_uint16(arguments, 0);
     dosetfreq (temp);
-}
-
-void cli_cal_offsets(sl_cli_command_arg_t *arguments)
-{
-    (void)arguments;
-#ifdef USE_CAL_SWEEP
-    run_cal_offsets = true;
-    dosweep ();
-#endif
 }
 
 void cli_print_samples(sl_cli_command_arg_t *arguments)

@@ -11,6 +11,14 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v28:
+- Removed sweep calibration code under USE_CAL_SWEEP and in CLI
+- Added sending of Accel data after Sweep & PPG frames
+- Improved PENDING state and handling of waiting for bytesRemaining to reach 0 before calling handleNewPacket
+- BUGFIX: Called shutoffRFICs() in END state, which saves 170mA current while waiting in stopped state
+- Added VBAT_ADC battery level read and print / report over BLE
+- Sleep current is ~1.38mA, with ~45msec periodic spikes which could be due to battery charger with no battery.
+
 ==> orbio_biosensor_v27:
 - Added an inactivity timer to go to Low Power Mode if there is no activity, to save battery
 - If there is Accel movement or BLE connection is open, both count as activity

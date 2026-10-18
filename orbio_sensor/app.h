@@ -45,7 +45,6 @@
 #endif
 #undef USE_ATOMIC
 #undef USE_SLEEP_WAKE
-#undef USE_CAL_SWEEP
 
 /**************************************************************************//**
  * Application Init.
@@ -111,7 +110,6 @@ extern bool userinput;
 extern uint32_t frequency_to_set_khz;
 extern int i_avg_mV[NUM_FREQS], q_avg_mV[NUM_FREQS];
 extern int i_avg_sum[NUM_FREQS][NUM_CAL_SWEEPS], q_avg_sum[NUM_FREQS][NUM_CAL_SWEEPS];
-extern bool run_cal_offsets;
 
 /**************************************************************************//**
  * ADC related
@@ -131,6 +129,7 @@ extern bool run_cal_offsets;
 void initIADC (void);
 void disableIADC (void);
 void doIADC (void);
+uint16_t doIADCBattery (void);
 void resetResultArray (void);
 // Number of ADC scan channels (One I/Q pair)
 #define NUM_INPUTS 2

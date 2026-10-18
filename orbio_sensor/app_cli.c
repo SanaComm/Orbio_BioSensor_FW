@@ -15,7 +15,6 @@ void cli_dosweep(sl_cli_command_arg_t *arguments);
 void cli_stop_sweep(sl_cli_command_arg_t *arguments);
 void cli_set_sweep_timing(sl_cli_command_arg_t *arguments);
 void cli_set_freq(sl_cli_command_arg_t *arguments);
-void cli_cal_offsets(sl_cli_command_arg_t *arguments);
 void cli_print_samples(sl_cli_command_arg_t *arguments);
 void cli_set_lpm(sl_cli_command_arg_t *arguments);
 void cli_print_unit_id(sl_cli_command_arg_t *arguments);
@@ -116,13 +115,6 @@ static const sl_cli_command_info_t cmd_set_freq =
                         SL_CLI_ARG_END,
                     });
 
-static const sl_cli_command_info_t cmd_cal_offsets =
-    SL_CLI_COMMAND(cli_cal_offsets, "Calibrate IQ offsets\r",
-                    "" SL_CLI_UNIT_SEPARATOR,
-                    {
-                        SL_CLI_ARG_END,
-                    });
-
 static const sl_cli_command_info_t cmd_print_samples =
     SL_CLI_COMMAND(cli_print_samples, "Print samples (default 0)\r",
                     "onoff 1:on 0:off\r" SL_CLI_UNIT_SEPARATOR,
@@ -158,7 +150,6 @@ static sl_cli_command_entry_t custom_cmd_table[] =
     {"stop_sweep", &cmd_stop_sweep, false},
     {"set_iq_offsets", &cmd_set_iq_offsets, false},
     {"set_freq", &cmd_set_freq, false},
-    {"cal_offsets", &cmd_cal_offsets, true},
     {"set_lna_vga_gain", &cmd_set_lna_vga_gain, false},
     {"set_sweep_timing", &cmd_set_sweep_timing, true},
     {"set_trigfreq", &cmd_set_trigfreq, false},

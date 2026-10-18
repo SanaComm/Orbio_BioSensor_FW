@@ -56,8 +56,6 @@
 #define USE_ADC_TIMER
 // Option to use LDMA to transfer ADC samples
 #define USE_ADC_LDMA
-// For testing FIFO timing
-#undef TOGGLE_RAMP_DIR
 
 // Set CLK_ADC to 10MHz
 #define CLK_SRC_ADC_FREQ      20000000  // CLK_SRC_ADC
@@ -102,7 +100,12 @@ void initIADC (void)
   IADC_InitScan_t initScan = IADC_INITSCAN_DEFAULT;
   IADC_ScanTable_t initScanTable = IADC_SCANTABLE_DEFAULT;
 
+  // Enable IADC0 clock branch
   CMU_ClockEnable(cmuClock_IADC0, true);
+
+  // Reset IADC to reset configuration in case it has been modified by
+  // other code
+  IADC_reset(IADC0);
    
   // Select clock for IADC as FSRCO which is 20MHz
   // Use the FSRC0 as the IADC clock so it can run in EM2
@@ -233,7 +236,7 @@ void initIADC (void)
   // Initialize scan
   IADC_initScan(IADC0, &initScan, &initScanTable);
 
-#if !defined(USE_ADC_LDMA) || defined (TOGGLE_RAMP_DIR)
+#if !defined(USE_ADC_LDMA)
   // Clear any previous interrupt flags
   IADC_clearInt(IADC0, _IADC_IF_MASK);
 
@@ -309,26 +312,6 @@ void doIADC (void)
     }
 #endif
 }
-
-#else
-
-#ifdef TOGGLE_RAMP_DIR
-
-/**************************************************************************//**
- * @brief  IADC interrupt handler to toggle RAMP_DIR test pin
- *****************************************************************************/
-
-void IADC_IRQHandler(void)
-{
-  /*
-   * Clear the scan table complete interrupt.  Reading FIFO results
-   * does not do this automatically.
-   */
-  IADC_clearInt(IADC0, IADC_IF_SCANTABLEDONE);
-  GPIO_PinOutToggle(RAMP_DIR_PORT, RAMP_DIR_PIN);
-}
-
-#endif
 
 #endif
 
@@ -447,6 +430,96 @@ void disableIADC (void)
     while (IADC0->EN & _IADC_EN_DISABLING_MASK) {
     }
 #endif
+    // Switch off IADC to save current
+    CMU_ClockEnable(cmuClock_IADC0, false);
+    adc_init_done = false;
+}
+
+// When changing GPIO port/pins below, make sure to change xBUSALLOC macro's
+// accordingly.
+#define IADC_INPUT_0_BUS          BBUSALLOC
+#define IADC_INPUT_0_BUSALLOC     GPIO_BBUSALLOC_BEVEN0_ADC0
+
+// Initialise IADC to read VBAT_ADC pin single conversion
+static void initIADCBattery (void)
+{
+    // Declare init structs
+    IADC_Init_t init = IADC_INIT_DEFAULT;
+    IADC_AllConfigs_t initAllConfigs = IADC_ALLCONFIGS_DEFAULT;
+    IADC_InitSingle_t initSingle = IADC_INITSINGLE_DEFAULT;
+    IADC_SingleInput_t initSingleInput = IADC_SINGLEINPUT_DEFAULT;
+
+    // Enable IADC0 clock branch
+    CMU_ClockEnable(cmuClock_IADC0, true);
+
+    // Reset IADC to reset configuration in case it has been modified by
+    // other code
+    IADC_reset(IADC0);
+
+    // Select clock for IADC as FSRCO which is 20MHz
+    CMU_ClockSelectSet(cmuClock_IADCCLK, cmuSelect_FSRCO);
+
+    // Remain powered-up between conversions to avoid warmup time before each conversion
+    init.warmup = iadcWarmupKeepWarm;
+
+    // Set the HFSCLK prescale value here
+    init.srcClkPrescale = IADC_calcSrcClkPrescale(IADC0, CLK_SRC_ADC_FREQ, 0);
+
+    // Configuration 0 is used by both scan and single conversions by default
+    // Use unbuffered AVDD as reference
+    initAllConfigs.configs[0].reference = iadcCfgReferenceVddx;
+
+    // Divides CLK_SRC_ADC to set the CLK_ADC frequency
+    initAllConfigs.configs[0].adcClkPrescale = IADC_calcAdcClkPrescale(IADC0,
+                                               CLK_ADC_FREQ,
+                                               0,
+                                               iadcCfgModeNormal,
+                                               init.srcClkPrescale);
+
+    // Assign pins to positive and negative inputs in differential mode
+    initSingleInput.posInput   = iadcPosInputPortBPin0;
+    initSingleInput.negInput   = iadcNegInputGnd;
+
+    // Initialize the IADC
+    IADC_init(IADC0, &init, &initAllConfigs);
+
+    // Initialize the Single conversion inputs
+    IADC_initSingle(IADC0, &initSingle, &initSingleInput);
+
+    // Allocate the analog bus for ADC0 inputs
+    GPIO->IADC_INPUT_0_BUS |= IADC_INPUT_0_BUSALLOC;
+    adc_init_done = true;
+}
+
+#define NUM_ADC_CONVERSIONS (20)
+
+uint16_t doIADCBattery (void)
+{
+    uint16_t mV;
+    int32_t sample = 0;
+
+    initIADCBattery ();
+
+    for (int i = 0; i < NUM_ADC_CONVERSIONS; i++)
+    {
+        // Start IADC conversion
+        IADC_command(IADC0, iadcCmdStartSingle);
+        // Wait for conversion to be complete
+        // While combined status bits 8 & 6 don't equal 1 and 0 respectively
+        while((IADC0->STATUS & (_IADC_STATUS_CONVERTING_MASK | _IADC_STATUS_SINGLEFIFODV_MASK)) != IADC_STATUS_SINGLEFIFODV);
+        // Average second half of ADC results
+        if (i >= (NUM_ADC_CONVERSIONS / 2))
+            sample += IADC_pullSingleFifoResult(IADC0).data;
+    }
+
+    // Calculate input voltage based on Vref:
+    // 12 bits represents full scale IADC range, 2x for resistor divider
+    mV = ((sample * VREF_MV * 2) / (1 << 12)) / (NUM_ADC_CONVERSIONS / 2);
+    printf ("VBAT = %d mV\n\r", mV);
+
+    disableIADC ();
+
+    return mV;
 }
 
 /* End of file */

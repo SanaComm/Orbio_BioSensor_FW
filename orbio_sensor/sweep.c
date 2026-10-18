@@ -74,7 +74,7 @@ void doOneSweep (int sweepcount)
         // Set RX gains
         setCMX994_LNA_VGA_Gain (lnagain, vgagain);
         // Set IQ offsets based on frequency
-        setCMX994_Offset (i_avg_mV[CONVERTFREQTOINDEX(i)], q_avg_mV[CONVERTFREQTOINDEX(i)]);
+        setCMX994_Offset (0, 0);
         // Set LO frequency
         setLMX2572LP (i, 1, 0);
 
@@ -140,27 +140,6 @@ void doOneSweep (int sweepcount)
         }
     }
 
-#ifdef USE_CAL_SWEEP
-    if (run_cal_offsets == true)
-    {
-        int cntr = 0;
-        PRINT_SWEEP_DEBUG ("\n\r");
-        for (int i = 0; i < NUM_FREQS; i++)
-        {
-            int i_sum = 0, q_sum = 0;
-            for (int k = 0; k < NUM_SAMPLES_PER_FREQ; k++)
-            {
-                i_sum += resultArray[cntr][0];
-                q_sum += resultArray[cntr][1];
-                cntr++;
-            }
-            i_avg_sum[i][sweepcount] = (i_sum / NUM_SAMPLES_PER_FREQ);
-            q_avg_sum[i][sweepcount] = (q_sum / NUM_SAMPLES_PER_FREQ);
-            PRINT_SWEEP_DEBUG ("At %d, I:%d, Q:%d\n\r", i, i_sum / NUM_SAMPLES_PER_FREQ, q_sum / NUM_SAMPLES_PER_FREQ);
-        }
-    }
-#endif
-
     // Set back to default clock rate for other devices
     SPIDRV_SetBitrate (sl_spidrv_inst0_handle, SL_SPIDRV_INST0_BITRATE);
     PRINT_SWEEP_INFO (" sweep done\n\r");
@@ -187,7 +166,7 @@ void doSetFreq (void)
     // Set RX gains
     setCMX994_LNA_VGA_Gain (lnagain, vgagain);
     // Set IQ offsets based on frequency
-    setCMX994_Offset (i_avg_mV[CONVERTFREQTOINDEX(frequency_to_set_khz)], q_avg_mV[CONVERTFREQTOINDEX(frequency_to_set_khz)]);
+    setCMX994_Offset (0, 0);
     // Set to fast clock rate for PLL
     SPIDRV_SetBitrate (sl_spidrv_inst0_handle, CMU_ClockFreqGet (cmuClock_PCLK) / 2);
     // First set the base frequency so that PLL code will reset and do full calibration

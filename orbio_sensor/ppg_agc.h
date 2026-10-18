@@ -12,9 +12,9 @@
  *   1. Accumulate the DC average over AGC_WINDOW_SAMPLES samples.
  *   2. Compare the average against two thresholds (% of 20-bit ADC full scale):
  *
- *        avg < AGC_LOW_THRESHOLD_PCT  (80%)  → increase PA by AGC_PA_STEP
- *        avg > AGC_HIGH_THRESHOLD_PCT (90%)  → decrease PA by AGC_PA_STEP
- *        80% <= avg <= 90%                   → in target band, no change
+ *        avg < AGC_LOW_THRESHOLD_PCT         → increase PA by AGC_PA_STEP
+ *        avg > AGC_HIGH_THRESHOLD_PCT        → decrease PA by AGC_PA_STEP
+ *        Else                                → in target band, no change
  *
  *   3. A cooldown of AGC_COOLDOWN_WINDOWS windows is enforced between
  *      consecutive adjustments to prevent oscillation.
@@ -70,8 +70,9 @@ extern "C" {
  * Target band as a percentage of the positive 20-bit ADC full scale
  * (0x7FFFF = 524 287).  AGC keeps the DC average inside [LOW, HIGH].
  */
-#define AGC_LOW_THRESHOLD_PCT       80u   /* below -> raise LED   */
-#define AGC_HIGH_THRESHOLD_PCT      90u   /* above -> lower LED   */
+#define AGC_LOW_THRESHOLD_PCT       60u   /* below -> raise LED   */
+#define AGC_HIGH_THRESHOLD_PCT      70u   /* above -> lower LED   */
+#define AGC_LOW_THRESHOLD_PCT_MIN   30u   /* don't go below this */
 
 /**
  * Cooldown in windows between successive PA adjustments.
@@ -79,13 +80,26 @@ extern "C" {
  */
 #define AGC_COOLDOWN_WINDOWS         3u
 
-/** Step size per PA adjustment (1 LSB =~ 0.5 mA at 124 mA LED range). */
-/** (1 LSB =~ 0.12 mA at 31 mA LED range). */
-#define AGC_PA_STEP                  1u
+/**
+ * Fast correction: when the average is outside the target band,
+ * estimate the PA change required to move the average toward the target
+ * midpoint, then apply this fraction of that correction.
+ *
+ * This preserves the existing decision criteria but avoids crawling 1 LSB
+ * at a time. Deliberately conservative to reduce overshoot.
+ */
+#define AGC_FAST_CORRECTION_PCT      70u
+
+/**
+ * Safety cap on one fast correction.  The AGC still has the existing
+ * cooldown between corrections.
+ */
+#define AGC_MAX_FAST_PA_STEP         20u
 
 /** Absolute PA register limits. */
 #define AGC_PA_MIN                   0u
-#define AGC_PA_MAX                 255u
+#define AGC_PA_MAX                 100u  // Keep at a safe middle level so as to not go
+                                         // all the way to 32 mA
 
 /** Maximum LED drivers per channel (DRVA / DRVB / DRVC). */
 #define AGC_MAX_DRIVERS_PER_CH       3u
@@ -104,7 +118,9 @@ extern "C" {
  *
  * Skin contact with any reasonable LED current returns hundreds of thousands
  * of counts.  Air returns near zero even at maximum LED current.
- * 15% = ~78 643 counts is conservative enough to survive motion artefacts.
+ * 15% = ~76 642 counts is conservative enough to survive motion artefacts.
+ *
+ * Don't keep it so low that even without proximity it's detected as on-body
  */
 #define AGC_PROX_SIGNAL_PCT         15u
 
@@ -135,7 +151,7 @@ extern "C" {
  * Mid-range starting point lets AGC converge without large overshoot.
  * 30 LSB =~ 3.6 mA in 31 mA range and 14.4 mA in 124 mA range.
  */
-#define AGC_PROX_RESTART_PA         30u
+#define AGC_PROX_RESTART_PA         20u
 
 /**
  * Minimum number of channels that must report off-body before
@@ -153,11 +169,6 @@ extern "C" {
 /** 20-bit signed ADC positive full scale (524 287). */
 #define AGC_FULL_SCALE_POS  ((int32_t)((1u << 19u) - 1u))
 
-/** Absolute count thresholds derived from percentages above. */
-#define AGC_THRESH_LOW   ((int32_t)((AGC_FULL_SCALE_POS * (int32_t)AGC_LOW_THRESHOLD_PCT)  / 100))
-#define AGC_THRESH_HIGH  ((int32_t)((AGC_FULL_SCALE_POS * (int32_t)AGC_HIGH_THRESHOLD_PCT) / 100))
-#define AGC_THRESH_PROX  ((int32_t)((AGC_FULL_SCALE_POS * (int32_t)AGC_PROX_SIGNAL_PCT)    / 100))
-
 /* =========================================================================
  * Data types
  * ========================================================================= */
@@ -170,6 +181,11 @@ typedef struct {
 
 /** Per-channel AGC + proximity state. */
 typedef struct {
+    /* ── AGC thresholds ─────────────────────────────────────────────────── */
+    int32_t  AGC_THRESH_LOW;    /**< Target band lower range.               */
+    int32_t  AGC_THRESH_HIGH;   /**< Target band upper range.               */
+    int32_t  AGC_THRESH_PROX;   /**< Proximity threshold.                   */
+
     /* ── Sample accumulator ─────────────────────────────────────────────── */
     int64_t  window_sum;        /**< Running sum over the current window.   */
     uint16_t window_cnt;        /**< Samples accumulated so far.            */
@@ -203,6 +219,16 @@ typedef struct {
  * ========================================================================= */
 
 /**
+ * @brief Function to set individual percentage thresholds for an AGC channel
+ *
+ * @param  chan  Channel number (0 to 7)
+ * @param  high  Target range maximum percentage of full range
+ * @param  low   Target range minimum percentage of full range
+ * @param  prox  Proximity detect percentage of full range
+ */
+void set_channel_thresholds (uint8_t ch_idx, uint8_t low, uint8_t high, uint8_t prox);
+
+/**
  * @brief  Initialise AGC + proximity state from the compile-time config table.
  *
  *         Call once after max86171_load_config_from_table() succeeds.
@@ -224,7 +250,7 @@ void ppg_agc_init(ppg_agc_t *agc);
  * @return true  if a PA register write was issued this call.
  * @return false otherwise.
  */
-bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t raw);
+bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t raw, bool ovf_error);
 
 /**
  * @brief  Return true if the sensor is determined to be off the body.

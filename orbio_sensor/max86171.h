@@ -344,11 +344,6 @@ size_t max86171_get_config_size(void);
  */
 int max86171_get_config_entry(size_t index, uint8_t *addr, uint8_t *value);
 
-/*
- * @brief Set register configuration entry by index
- */
-int max86171_set_config_current(size_t index, uint8_t value);
-
  /**
   * @brief Shutdown the device
   */

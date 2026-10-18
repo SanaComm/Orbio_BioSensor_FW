@@ -11,6 +11,18 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v22:
+- IMPROVE: Added extraction of measurement number for OVF errors. May fail if too many channels with OVF.
+- Restarting channel from a smaller LED current if OVF is detected
+- PPG AGC off by default for demo
+- Shortened max86171_status_read_clear ERROR prints
+- Removed command set_ppg_meas and function max86171_set_config_current
+- Measurement 8 set to slightly higher idle current for now to get higher amplitude waveform
+- Individual percentage target amplitude thresholds per AGC channel
+- Fast AGC step (limited to 20) instead of 1 LSB at a time, based on delta to target amplitude
+- LED current maximum setting of 100 (out of 255) to limit current on any LED to a safe value
+- LED current limited to a setting of 20 after proximity is detected
+
 ==> orbio_biosensor_v21:
 - Enabled IR measurements
 - Set all LEDs' starting currents to idle LED currents used by PPG AGC

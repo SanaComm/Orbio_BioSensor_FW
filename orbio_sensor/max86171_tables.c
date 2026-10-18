@@ -126,6 +126,7 @@ Code  LEDx_DRV Pin 	    Code	LEDx_DRV Pin		Code	LEDx_DRV Pin
  * TODO: configuration doubts
  * 1.  Why not set SINC3 = 1 as we have TINT = 117.1us which allows this setting
  * 2.  What is the logic behind PPG1/PPG2 ADC full range settings of 16uA?
+ * 3.  Think about having different start current settings for each measurement
  */
 
 max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_REGS] = {
@@ -383,8 +384,8 @@ max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_RE
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    MAX86171_PD_SETLNG_12_1us)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS8_DRVA_PA,   0x00u},             /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS8_DRVB_PA,   AGC_PROX_IDLE_PA},  /* LED8_DRV            */
-    {MAX86171_REG_MEAS8_DRVC_PA,   AGC_PROX_IDLE_PA},  /* LED9_DRV            */
+    {MAX86171_REG_MEAS8_DRVB_PA,   8},  /* LED8_DRV            */
+    {MAX86171_REG_MEAS8_DRVC_PA,   8},  /* LED9_DRV            */
 },
 
 // MEAS9 [8] — Ambient (all drivers PA=0)

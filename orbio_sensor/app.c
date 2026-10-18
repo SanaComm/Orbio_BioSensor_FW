@@ -44,7 +44,7 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (21)
+#define VERSION (22)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -82,6 +82,7 @@ static const char *getModuleName(app_module_t module)
 // TODO: What if a module is stopped from CLI or BLE, and there is a timer/interrupt that just triggers
 // TODO: Current handleNewPacket does not work if two or more packet types have to be interspersed
 // TODO: VBAT_ADC periodic read and battery status check
+// TODO: Wake/sleep cycle for PPG & Accel modes
 
 /**************************************************************************************************
     Sleep/Wake States Defines and Variables.
@@ -569,7 +570,7 @@ static bool handleNewPacket (app_module_t source, uint8_t *dataSource, uint16_t 
 {
     // True if packet was fully sent or connection not opened or previous data not fully sent
     // False if packet partially sent or send failure which needs retry i.e. send is ongoing
-    // TODO: The bool return value is overloaded and bytesRemaining is used to distinguish
+    // Note: The bool return value is overloaded and bytesRemaining is used to distinguish
     // some cases
     bool ret = true;
     if (!dataSource || (dataSourceLen > ((int)sizeof(resultArraySend) - HEADER_SIZE)))
@@ -808,6 +809,7 @@ static bool ppg_init_done, ppg_agc_on;
 static uint8_t fifo_buf[MAX_FIFO_SAMPLES * 3];
 static uint16_t samplecount;
 static bool tag1found;
+static uint8_t predicted_tag;
 static ppg_agc_t g_agc;
 static void dostopppg (void);
 
@@ -844,8 +846,9 @@ static void start_ppg (void)
         dostopppg ();
         return;
     }
-    // Last tag is unknown to begin with
+    // tag is unknown to begin with
     tag1found = false;
+    predicted_tag = 0;
 
     // Verify MAX86171 power ready before proceeding
     // TODO: Due to the retries this could take almost 0.5 sec which can
@@ -934,6 +937,7 @@ static bool read_ppg_fifo (void)
         }
         // Last tag is unknown to begin with
         tag1found = false;
+        predicted_tag = 0;
         return false;
     }
 
@@ -1001,11 +1005,22 @@ static void parse_ppg_fifo (void)
         // Doesn't seem to be required. We can just handle the tags as they come and not
         // expect any sequencing. The AGC anyway acts on different measurements independently.
 
+        bool ovf_error = false;
         // Handle basic PPG tag errors
         if (tag < 1u || tag2 != tag || tag > MAX86171_NUM_MEAS)
         {
-            PRINT_ERROR ("ERROR: in tag %d, %d, %d\n\r", i, tag, tag2);
-            continue;
+            PRINT_IGNORE ("ERROR: in sample %d, tag1 %d, tag2 %d\n\r", i, tag, tag2);
+            // These errors indicate the current is too high, so reduce sample target range
+            if (((tag == MAX86171_TAG_ALC_OVF) || (tag == MAX86171_TAG_EXP_OVF) || (tag2 == MAX86171_TAG_ALC_OVF) || (tag2 == MAX86171_TAG_EXP_OVF)) && predicted_tag)
+            {
+                tag = predicted_tag;
+                PRINT_IGNORE ("OVF ERROR in predicted tag %d\n\r", tag);
+                ovf_error = true;
+            }
+            else
+            {
+                continue;
+            }
         }
         // Skip the last (ambient) measurement
         else if (tag == MAX86171_NUM_MEAS)
@@ -1026,6 +1041,8 @@ static void parse_ppg_fifo (void)
             // tag = 1 has been found so no need to check for it in the future
             tag1found = true;
         }
+        // This is to help find the measurement number in case the next one had OVF errors in tag
+        predicted_tag = (tag % (MAX86171_NUM_MEAS - 1)) + 1;
 
         /* Bugfix: average the two 20-bit values after sign-extension */
         uint32_t pd1 = ((uint32_t)p1b0 << 16) | ((uint32_t)p1b1 << 8) | p1b2;
@@ -1045,7 +1062,7 @@ static void parse_ppg_fifo (void)
         if (ppg_agc_on == true)
         {
             // Feed samples to the AGC algorithm for each PPG1/PPG2 pair
-            ppg_agc_feed(&g_agc, &max86171_dev, tag - 1u, avg);
+            ppg_agc_feed(&g_agc, &max86171_dev, tag - 1u, avg, ovf_error);
         }
 
         // Shouldn't happen due to limiting of samplecount, but add anyway
@@ -1577,32 +1594,6 @@ static void dosetppgagc (uint8_t agconoff)
     {
         ppg_agc_on = agconoff;
     }
-    
-}
-
-static void dosetppgmeas (uint8_t temp0, uint8_t temp1, uint8_t temp2)
-{
-    if ((temp0 == 0) || (temp0 > (MAX86171_NUM_MEAS - 1)))
-    {
-        PRINT_ERROR("set_ppg_meas: incorrect argument %d\n\r", temp0);
-        return;
-    }
-    if ((temp1 == 0) || (temp1 > 3))
-    {
-        PRINT_ERROR("set_ppg_meas: incorrect argument %d\n\r", temp1);
-        return;
-    }
-    // Now use these to set the averaging and LED drive currents for a measurement
-    // Note: Mapping of a LEDx_DRV to DRVA/B/C_SEL is currently fixed for a measurement
-    PPG_Average_Type[temp0 - 1] = temp1;
-    // Only change currents if not 0
-    if (temp2)
-    {
-        // Change registers
-        ppg_agc_force_pa (&g_agc, &max86171_dev, temp0 - 1, temp2);
-        // Also change in the table so that this change is not lost on the next restart
-        max86171_set_config_current(temp0 - 1, temp2);
-    }
 }
 
 #endif
@@ -1878,7 +1869,7 @@ SL_WEAK void app_init(void)
     cli_custom_cmd_init();
     // Set default value for PPG variables
     ppg_init_done = false;
-    ppg_agc_on = true;
+    ppg_agc_on = false;
     // Average both PPG1 & PPG2
     for (int i = 0; i < MAX86171_NUM_MEAS - 1; i++) PPG_Average_Type[i] = 3;
     // Set default values for variables set by command line
@@ -2279,20 +2270,6 @@ void cli_set_ppg_agc(sl_cli_command_arg_t *arguments)
     }
     uint8_t temp = sl_cli_get_argument_uint8(arguments, 0);
     dosetppgagc (temp);
-}
-
-void cli_set_ppg_meas(sl_cli_command_arg_t *arguments)
-{
-    int argc = sl_cli_get_argument_count(arguments);
-    if (argc != 3)
-    {
-        PRINT_ERROR("set_ppg_meas: incorrect number of arguments. Expected 3!\n\r");
-        return;
-    }
-    uint8_t temp0 = sl_cli_get_argument_uint8(arguments, 0);
-    uint8_t temp1 = sl_cli_get_argument_uint8(arguments, 1);
-    uint8_t temp2 = sl_cli_get_argument_uint8(arguments, 2);
-    dosetppgmeas (temp0, temp1, temp2);
 }
 
 #endif

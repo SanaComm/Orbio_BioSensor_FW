@@ -42,8 +42,9 @@
 #include "ppg_agc.h"
 #include "accel.h"
 #include "sl_cli_handles.h"
+#include "math.h"
 
-#define VERSION (17)
+#define VERSION (18)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -79,6 +80,8 @@ static const char *getModuleName(app_module_t module)
 
 // TODO: What if a module is stopped from CLI or BLE, and there is a timer/interrupt that just triggers
 // TODO: Current handleNewPacket does not work if two or more packet types have to be interspersed
+// TODO: There is no check that handleNewPacket is not called before all chunks of previous packet
+// were sent out, which could result in resultArraySend getting overwritten.
 // TODO: VBAT_ADC periodic read and battery status check
 
 /**************************************************************************************************
@@ -98,15 +101,16 @@ static volatile sleep_state_t sleepState;
 
 uint8_t trigfreq;
 uint8_t pll_gain;
-int16_t ioffset, qoffset;
 uint8_t sync_mode;
 uint32_t frequency_to_set_khz;
 bool iq_print_enabled;
+bool run_cal_offsets;
+uint8_t lnagain, vgagain;
 #define SWEEP_INTERVAL_DEFAULT_SEC (1 * 60)
 #define ACTIVE_TIME_DEFAULT_SEC (30)
 static uint16_t sweep_interval_sec;
 static uint16_t active_time_sec;
-static char reportsettings[40];
+static char reportsettings[30];
 // Device name to advertise
 static uint8_t devicename[] = {'O', 'r', 'b', 'i', 'o', '-', 0, 0, 0, 0, 0, 0, 0};
 
@@ -819,6 +823,8 @@ static void start_ppg (void)
     tag1found = false;
 
     // Verify MAX86171 power ready before proceeding
+    // TODO: Due to the retries this could take almost 0.5 sec which can
+    // bring down BLE connection as this is called from processblesetting.
     int count = 10;
     while (1)
     {
@@ -1149,6 +1155,15 @@ static void stopLedTimer (void)
 
 static uint32_t last_set_frequency;
 
+int i_avg_mV[NUM_FREQS], q_avg_mV[NUM_FREQS];
+int i_avg_sum[NUM_FREQS][NUM_CAL_SWEEPS], q_avg_sum[NUM_FREQS][NUM_CAL_SWEEPS];
+
+void clearIQOffsets (void)
+{
+    memset (i_avg_mV, 0, sizeof (i_avg_mV));
+    memset (q_avg_mV, 0, sizeof (q_avg_mV));
+}
+
 static void run_sweep_statemachine (void)
 {
     switch (sweepState)
@@ -1182,7 +1197,6 @@ static void run_sweep_statemachine (void)
         // Enable downconvertor and IADC
         resetCMX994 ();
         enableCMX994 ();
-        setCMX994Offset (ioffset, qoffset);
         initIADC();
         // Continue with sweep
         if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
@@ -1192,6 +1206,11 @@ static void run_sweep_statemachine (void)
 #ifdef STORE_SWEEPS
         initStoreSweep ();
 #endif
+        if (run_cal_offsets == true)
+        {
+            // Clear before running cal sweeps
+            clearIQOffsets ();
+        }
         }
         break;
 
@@ -1200,11 +1219,11 @@ static void run_sweep_statemachine (void)
         uint32_t endtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
         if ((endtime - starttime) < (active_time_sec * 1000))
         {
-            doOneSweep ();
+            doOneSweep (sweepcount);
             sweepcount++;
-            if ((userinput == true) || (active_module == 0))
+            if ((userinput == true) || (active_module == 0) || ((run_cal_offsets == true) && (sweepcount == NUM_CAL_SWEEPS)))
             {
-                PRINT_INFO ("User entered a key ... break from sweep\n\r");
+                PRINT_INFO ("Break from sweep\n\r");
                 sweepState = SWEEP_STATE_END;
                 // Finish up sweep
                 if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
@@ -1271,7 +1290,7 @@ static void run_sweep_statemachine (void)
                 frequency_to_set_khz -= FREQ_STEP_KHZ; 
                 // Wrap around frequency
                 if (frequency_to_set_khz == START_FREQ_KHZ)
-                    frequency_to_set_khz = END_FREQ_KHZ;
+                    frequency_to_set_khz = END_FREQ_KHZ - FREQ_STEP_KHZ;
                 last_set_frequency = 0;
             }
             if (active_module == 0)
@@ -1309,6 +1328,17 @@ static void run_sweep_statemachine (void)
         frequency_to_set_khz = 0;
         // Stop LED timer for Sweep status
         stopLedTimer ();
+        if (run_cal_offsets == true)
+        {
+            // Calculate clusters after running all cal sweeps
+            for (int i = 0; i < NUM_FREQS; i++)
+            {
+                int icent0, icent1, qcent0, qcent1;
+                two_means_2D(&i_avg_sum[i][0], &q_avg_sum[i][0], NUM_CAL_SWEEPS, &icent0, &qcent0, &icent1, &qcent1);
+                PRINT_INFO ("Freq index %d, <IQ1:%d, %d>, <IQ2:%d, %d>\n\r", i, icent0, qcent0, icent1, qcent1);
+            }
+            run_cal_offsets = false;
+        }
         // Go to sleep and wait for timer
         setLowPowerMode ();
         }
@@ -1336,18 +1366,33 @@ static void dosettrigfreq (uint8_t temp)
     }
 }
 
-static void dosetiqoffsets (int temp1, int temp2)
+static void dosetiqoffsets (int8_t temp1, int8_t temp2)
 {
     if ((abs(temp1) <= CMX994_MAX_OFFSET) && (abs(temp2) <= CMX994_MAX_OFFSET))
     {
-        PRINT_INFO ("Set Ioffset = %d mV, Qoffset = %d mV\n\r", temp1, temp2);
-        ioffset = temp1;
-        qoffset = temp2;
-        setCMX994Offset (ioffset, qoffset);
+        PRINT_INFO ("Set Ioffset = %d, Qoffset = %d\n\r", temp1, temp2);
+        PRINT_INFO ("Step size = %.2f mV\n\r", 25 * pow (10.0, (-6.0 / 20) * vgagain));
+        setCMX994_Offset (temp1, temp2);
     }
     else
     {
         PRINT_ERROR ("ERROR: invalid arguments to set_iq_offsets: %d, %d\n\r", temp1, temp2);
+    }
+}
+
+static void dosetlnavgagain (uint8_t temp1, uint8_t temp2)
+{
+    if ((temp1 <= CMX994_MAX_LNA_GAIN) && (temp2 <= CMX994_MAX_VGA_GAIN))
+    {
+        lnagain = temp1;
+        vgagain = temp2;
+        PRINT_INFO ("Set LNA gain = %d dB, VGA gain = %d dB\n\r", -6 * (int)temp1, -6 * (int)temp2);
+        PRINT_INFO ("IQ offsets step size = %.2f mV\n\r", 25 * pow (10.0, (-6.0 / 20) * vgagain));
+        setCMX994_LNA_VGA_Gain (lnagain, vgagain);
+    }
+    else
+    {
+        PRINT_ERROR ("ERROR: invalid arguments to set_lna_vga_gain: %d, %d\n\r", temp1, temp2);
     }
 }
 
@@ -1385,6 +1430,18 @@ static void dosetsweeptiming (int temp1, int temp2)
     }
 }
 
+static void dosetfreq (uint16_t temp)
+{
+    // Check range and multiple of step frequency
+    if ((temp < START_FREQ_KHZ / 1000) || (temp >= END_FREQ_KHZ / 1000) || ((temp % (FREQ_STEP_KHZ / 1000)) != 0))
+    {
+        PRINT_ERROR("set_freq: incorrect argument %d\n\r", temp);
+    }
+    else
+    {
+        frequency_to_set_khz = temp * 1000;
+    }
+}
 static void dosweep (void)
 {
     if (active_module)
@@ -1581,6 +1638,31 @@ static void processblesetting (char *payload, int len)
 
         case 4:
         // Make sure we did receive these fields
+        if (temp1_exists == true)
+            dosetfreq (temp1);
+        else
+        {
+            PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
+        }
+        break;
+
+        case 5:
+        run_cal_offsets = true;
+        dosweep ();
+        break;
+
+        case 6:
+        // Make sure we did receive these fields
+        if ((temp1_exists == true) && (temp2_exists == true))
+            dosetlnavgagain (temp1, temp2);
+        else
+        {
+            PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
+        }
+        break;
+
+        case 7:
+        // Make sure we did receive these fields
         if ((temp1_exists == true) && (temp2_exists == true))
             dosetsweeptiming (temp1, temp2);
         else
@@ -1589,7 +1671,7 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
-        case 5:
+        case 8:
         // Make sure we did receive the field
         if (temp1_exists == true)
             dosettrigfreq (temp1);
@@ -1599,7 +1681,7 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
-        case 6:
+        case 9:
         // Make sure we did receive the field
         if (temp1_exists == true)
             dosetpllgain (temp1);
@@ -1609,20 +1691,20 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
-        case 7:
+        case 10:
         dostartaccel ();
         break;
 
-        case 8:
+        case 11:
         dostopaccel ();
         break;
 
 #ifdef USE_PPG
-        case 9:
+        case 12:
         dostartppg ();
         break;
 
-        case 10:
+        case 13:
         dostopppg ();
         break;
 #endif
@@ -1663,11 +1745,13 @@ SL_WEAK void app_init(void)
     // Set default values for variables set by command line
     trigfreq = 0;
     pll_gain = 8;
-    ioffset = 0;
-    qoffset = 0;
     sync_mode = 0;
     frequency_to_set_khz = 0;
     iq_print_enabled = false;
+    run_cal_offsets = false;
+    lnagain = 0;
+    vgagain = CMX994_MAX_VGA_GAIN;
+    clearIQOffsets ();
     sweep_interval_sec = SWEEP_INTERVAL_DEFAULT_SEC;
     active_time_sec = ACTIVE_TIME_DEFAULT_SEC;
     sweepState = SWEEP_STATE_INIT;
@@ -1956,7 +2040,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
         else if (evt->data.evt_gatt_server_user_read_request.characteristic == gattdb_report_parameters) {
           PRINT_INFO ("Got report settings from BLE client\n\r");
           memset (reportsettings, 0, sizeof (reportsettings));
-          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d,%d,%d", pll_gain, ioffset, qoffset, active_time_sec, sweep_interval_sec);
+          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d", pll_gain, active_time_sec, sweep_interval_sec);
           /* Send response to Read Request */
           sl_bt_gatt_server_send_user_read_response(
             evt->data.evt_gatt_server_user_read_request.connection,
@@ -1999,11 +2083,23 @@ void cli_set_iq_offsets(sl_cli_command_arg_t *arguments)
         PRINT_ERROR("set_iq_offsets: incorrect number of arguments. Expected 2!\n\r");
         return;
     }
-    int temp1 = sl_cli_get_argument_int16(arguments, 0);
-    int temp2 = sl_cli_get_argument_int16(arguments, 1);
+    int8_t temp1 = sl_cli_get_argument_int8(arguments, 0);
+    int8_t temp2 = sl_cli_get_argument_int8(arguments, 1);
     dosetiqoffsets (temp1, temp2);
 }
 
+void cli_set_lna_vga_gain(sl_cli_command_arg_t *arguments)
+{
+    int argc = sl_cli_get_argument_count(arguments);
+    if (argc != 2)
+    {
+        PRINT_ERROR("set_lna_vga_gain: incorrect number of arguments. Expected 2!\n\r");
+        return;
+    }
+    uint8_t temp1 = sl_cli_get_argument_uint8(arguments, 0);
+    uint8_t temp2 = sl_cli_get_argument_uint8(arguments, 1);
+    dosetlnavgagain (temp1, temp2);
+}
 void cli_set_pll_gain(sl_cli_command_arg_t *arguments)
 {
     int argc = sl_cli_get_argument_count(arguments);
@@ -2078,15 +2174,14 @@ void cli_set_freq(sl_cli_command_arg_t *arguments)
         return;
     }
     uint16_t temp = sl_cli_get_argument_uint16(arguments, 0);
-    // Check range and multiple of step frequency
-    if ((temp < START_FREQ_KHZ / 1000) && (temp >= END_FREQ_KHZ / 1000) && ((temp % (FREQ_STEP_KHZ / 1000)) != 0))
-    {
-        PRINT_ERROR("set_freq: incorrect argument %d\n\r", temp);
-    }
-    else
-    {
-        frequency_to_set_khz = temp * 1000;
-    }
+    dosetfreq (temp);
+}
+
+void cli_cal_offsets(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    run_cal_offsets = true;
+    dosweep ();
 }
 
 void cli_print_iq(sl_cli_command_arg_t *arguments)

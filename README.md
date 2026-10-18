@@ -11,6 +11,11 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v18:
+- Added commands set_lna_vga_gain, cal_offsets
+- Changed set_iq_offsets to take a bitfield and calculate step size based on VGA gain
+- Added a function to calculate 2-means cluster average given a set of 2D points
+
 ==> orbio_biosensor_v17:
 - Added code to keep the PLL+IADC code atomic and not be interrupted by LED timer
 - Removed switch_off_en_power_hfxo & switch_on_en_power_hfxo and implemented EMU_EFPEM23PresleepHook & EMU_EFPEM23PostsleepHook instead

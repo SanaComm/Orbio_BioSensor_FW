@@ -71,9 +71,6 @@
 // Sampling frequency desired
 #define SAMPLING_FREQ_HZ (40000)
 
-// IADC voltage reference in mV
-#define VREF_MV (3300L)
-
 /*
  * Specify the IADC input using the IADC_PosInput_t typedef.
  * As these are specialised Analog Input pins, no GPIO mapping
@@ -94,9 +91,7 @@ static bool adc_init_done = false;
 static volatile bool conversiondone;
 int16_t resultArray[RESULT_SIZE][NUM_INPUTS];
 static volatile int resultArrayIndex;
-// TODO: Why is this a uint16_t * and not int16_t *? Was there a specific reason?
-// Change after testing if needed for consistency.
-static uint16_t *resultArrayPtr;
+static int16_t *resultArrayPtr;
 #ifndef USE_ADC_LDMA
 static volatile int resultArrayIndexScan;
 #endif
@@ -345,7 +340,7 @@ void IADC_IRQHandler(void)
 void resetResultArray (void)
 {
     resultArrayIndex = 0;
-    resultArrayPtr = (uint16_t *)&resultArray[0][0];
+    resultArrayPtr = (int16_t *)&resultArray[0][0];
 }
 
 #ifdef USE_ADC_LDMA

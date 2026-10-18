@@ -63,10 +63,14 @@ void cli_custom_cmd_init(void);
 /**************************************************************************//**
  * CMX994 downconvertor related
  *****************************************************************************/
-#define CMX994_MAX_OFFSET (775)
+#define CMX994_MAX_OFFSET (31)
+#define CMX994_MAX_LNA_GAIN (3)
+#define CMX994_MAX_VGA_GAIN (7)
 void resetCMX994 (void);
 void enableCMX994 (void);
-void setCMX994Offset (int ioffset, int qoffset);
+void setCMX994_Offset (int8_t ioffset, int8_t qoffset);
+void setCMX994_LNA_VGA_Gain (uint8_t lnagain, uint8_t vgagain);
+extern uint8_t lnagain, vgagain;
 
 /**************************************************************************//**
  * LMX2572LP PLL related
@@ -74,7 +78,6 @@ void setCMX994Offset (int ioffset, int qoffset);
 #define LMX2572LP_MAX_GAIN (18)
 void powerdownLMX2572LP (void);
 int setLMX2572LP (int freq_khz, int rxtx, int offset_khz);
-extern uint8_t pll_gain;
 
 /**************************************************************************//**
  * Sweep related
@@ -88,20 +91,25 @@ extern uint8_t pll_gain;
 #define VCO_SWITCH_FREQ_KHZ (800000)
 #define NUM_FREQS ((END_FREQ_KHZ - START_FREQ_KHZ) / FREQ_STEP_KHZ)
 #define RESULT_SIZE (NUM_FREQS * NUM_SAMPLES_PER_FREQ)
+#define NUM_CAL_SWEEPS (100)
 
-void doOneSweep (void);
+void doOneSweep (int sweepcount);
 void doSetFreq (void);
 
 /**************************************************************************//**
  * Sweep related globals
  *****************************************************************************/
 
+extern uint8_t pll_gain;
 extern uint8_t trigfreq;
-extern int16_t ioffset, qoffset;
+extern int8_t ioffset, qoffset;
 extern uint8_t sync_mode;
 extern bool iq_print_enabled;
 extern bool userinput;
 extern uint32_t frequency_to_set_khz;
+extern int i_avg_mV[NUM_FREQS], q_avg_mV[NUM_FREQS];
+extern int i_avg_sum[NUM_FREQS][NUM_CAL_SWEEPS], q_avg_sum[NUM_FREQS][NUM_CAL_SWEEPS];
+extern bool run_cal_offsets;
 
 /**************************************************************************//**
  * ADC related
@@ -112,7 +120,16 @@ void doIADC (void);
 void resetResultArray (void);
 // Number of ADC scan channels (One I/Q pair)
 #define NUM_INPUTS 2
+// IADC voltage reference in mV
+#define VREF_MV (3300L)
 extern int16_t resultArray[RESULT_SIZE][NUM_INPUTS];
+
+/**************************************************************************//**
+ * 2-Means algorithm related
+ *****************************************************************************/
+
+void two_means(int *points, int n, int *cent0, int *cent1);
+void two_means_2D(int *Xpoints, int *Ypoints, int n, int *Xcent0, int *Ycent0, int *Xcent1, int *Ycent1);
 
 /**************************************************************************//**
  * MAX86171 related, needed to map to SiLabs with minimal code change

@@ -322,7 +322,7 @@
 						</toolChain>
 					</folderInfo>
 					<sourceEntries>
-						<entry excluding="image/readme_img0.png|image/readme_img1.png|image/readme_img2.png|image/readme_img3.png|image/readme_img4.png|simplicity_sdk_2024.6.1/protocol/bluetooth/api/sl_bt.xapi|create_bl_files.bat|create_bl_files.sh|create_bl_files.py|trashed_modified_files|orbio_sensor_cmake|orbio_sensor_iar_cmake" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
+						<entry excluding="two_cluster_average.c|image/readme_img0.png|image/readme_img1.png|image/readme_img2.png|image/readme_img3.png|image/readme_img4.png|simplicity_sdk_2024.6.1/protocol/bluetooth/api/sl_bt.xapi|create_bl_files.bat|create_bl_files.sh|create_bl_files.py|trashed_modified_files|orbio_sensor_cmake|orbio_sensor_iar_cmake" flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name=""/>
 					</sourceEntries>
 				</configuration>
 			</storageModule>

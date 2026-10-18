@@ -42,7 +42,6 @@ static int patternindex;
 
 // To keep the LED timer from firing during PLL+IADC operation
 // which we need to be as identical in time as possible
-// TODO: will this mess up Bluetooth?
 static CORE_irqState_t myIRQState;
 static void enter_atomic (void)
 {
@@ -63,7 +62,9 @@ static void waitForPLLLock (void)
     PRINT_SWEEP_DEBUG ("LMX2572LP locked\n\r");
 }
 
-void doOneSweep (void)
+#define CONVERTFREQTOINDEX(x) ((x - START_FREQ_KHZ) / FREQ_STEP_KHZ)
+
+void doOneSweep (int sweepcount)
 {
 #ifdef MEASURE_TIMING
     uint32_t time0 = sl_sleeptimer_get_tick_count();
@@ -83,6 +84,10 @@ void doOneSweep (void)
 #ifdef MEASURE_TIMING
         uint32_t time1 = sl_sleeptimer_get_tick_count();
 #endif
+        // Set RX gains
+        setCMX994_LNA_VGA_Gain (lnagain, vgagain);
+        // Set IQ offsets based on frequency
+        setCMX994_Offset (i_avg_mV[CONVERTFREQTOINDEX(i)], q_avg_mV[CONVERTFREQTOINDEX(i)]);
         // Set LO frequency
         setLMX2572LP (i, 1, 0);
 
@@ -145,21 +150,26 @@ void doOneSweep (void)
             }
         }
     }
-#if 1
-    int i_avg, q_avg, cntr = 0;
-    PRINT_SWEEP_INFO ("\n\r");
-    for (int i = 0; i < NUM_FREQS; i++)
+
+    if (run_cal_offsets == true)
     {
-        i_avg = 0, q_avg = 0;
-        for (int k = 0; k < NUM_SAMPLES_PER_FREQ; k++)
+        int cntr = 0;
+        PRINT_SWEEP_DEBUG ("\n\r");
+        for (int i = 0; i < NUM_FREQS; i++)
         {
-            i_avg += resultArray[cntr][0];
-            q_avg += resultArray[cntr][1];
-            cntr++;
+            int i_sum = 0, q_sum = 0;
+            for (int k = 0; k < NUM_SAMPLES_PER_FREQ; k++)
+            {
+                i_sum += resultArray[cntr][0];
+                q_sum += resultArray[cntr][1];
+                cntr++;
+            }
+            i_avg_sum[i][sweepcount] = (i_sum / NUM_SAMPLES_PER_FREQ);
+            q_avg_sum[i][sweepcount] = (q_sum / NUM_SAMPLES_PER_FREQ);
+            PRINT_SWEEP_DEBUG ("At %d, I:%d, Q:%d\n\r", i, i_sum / NUM_SAMPLES_PER_FREQ, q_sum / NUM_SAMPLES_PER_FREQ);
         }
-        PRINT_SWEEP_INFO ("%d:Iavg = %d, Qavg = %d\n\r", i, i_avg / NUM_SAMPLES_PER_FREQ, q_avg / NUM_SAMPLES_PER_FREQ);
     }
-#endif
+
     // Set back to default clock rate for other devices
     SPIDRV_SetBitrate (sl_spidrv_inst0_handle, SL_SPIDRV_INST0_BITRATE);
     PRINT_SWEEP_INFO (" sweep done\n\r");
@@ -206,6 +216,10 @@ void doOneSweep (void)
 
 void doSetFreq (void)
 {
+    // Set RX gains
+    setCMX994_LNA_VGA_Gain (lnagain, vgagain);
+    // Set IQ offsets based on frequency
+    setCMX994_Offset (i_avg_mV[CONVERTFREQTOINDEX(frequency_to_set_khz)], q_avg_mV[CONVERTFREQTOINDEX(frequency_to_set_khz)]);
     // Set to fast clock rate for PLL
     SPIDRV_SetBitrate (sl_spidrv_inst0_handle, CMU_ClockFreqGet (cmuClock_PCLK) / 2);
     // First set the base frequency so that PLL code will reset and do full calibration

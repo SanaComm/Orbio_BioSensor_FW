@@ -37,28 +37,25 @@ void enableCMX994 (void)
     // Disable low power mode (b4), VCO (b3), PLL (b2)
     // Enable RX (b1), TX (b0)
     cmd[0] = 0x11;
-    // (1 << 7) | (3 << 5) | (0 << 4) | (0 << 3) | (0 << 2) | (1 << 1) | (1 << 0)
-    cmd[1] = 0xE3;
+    cmd[1] = (1 << 7) | (3 << 5) | (0 << 4) | (0 << 3) | (0 << 2) | (1 << 1) | (1 << 0);
     sendCMX994 (cmd, sizeof (cmd));
 
     // tCSOFF=1usec from one command to the next i.e. between CS high to CS low
 
     // To set 50Ohm LNA output impedance, rest of gain settings at defaults
     cmd[0] = 0x16;
-    // (0 << 6) | (0 << 4) | (1 << 3) | (0 << 0)
-    cmd[1] = 0x08;
+    cmd[1] = (0 << 6) | (0 << 4) | (1 << 3) | (0 << 0);
     sendCMX994 (cmd, sizeof (cmd));
 
     // tCSOFF=1usec from one command to the next i.e. between CS high to CS low
 
     // To enable LO Input, TXLO=LO/2 and disable VCO related blocks.
     cmd[0] = 0x25;
-    // (0 << 7) | (0 << 5) | (1 << 4) | (0 << 3) | (0 << 2) | (0 << 1) | (0 << 0)
-    cmd[1] = 0x10;
+    cmd[1] = (0 << 7) | (0 << 5) | (1 << 4) | (0 << 3) | (0 << 2) | (0 << 1) | (0 << 0);
     sendCMX994 (cmd, sizeof (cmd));
 }
 
-void setCMX994Offset (int ioffset, int qoffset)
+void setCMX994_Offset (int8_t ioffset, int8_t qoffset)
 {
     uint8_t cmd[3];
     // Validate input offsets
@@ -68,12 +65,20 @@ void setCMX994Offset (int ioffset, int qoffset)
     if (qoffset < -CMX994_MAX_OFFSET) return;
     // To set the I/Q offsets
     cmd[0] = 0x17;
-    // Find index in steps of 25mV
-    cmd[1] = abs (qoffset) / 25;
-    cmd[2] = abs (ioffset) / 25;
-    // Add sign
-    if (qoffset < 0) cmd[1] |= (1 << 5);
-    if (ioffset < 0) cmd[2] |= (1 << 5);
+    cmd[1] = qoffset;
+    cmd[2] = ioffset;
+    sendCMX994 (cmd, sizeof (cmd));
+}
+
+void setCMX994_LNA_VGA_Gain (uint8_t lnagain, uint8_t vgagain)
+{
+    uint8_t cmd[2];
+    // Validate input offsets
+    if (lnagain > CMX994_MAX_LNA_GAIN) return;
+    if (vgagain > CMX994_MAX_VGA_GAIN) return;
+    // To set the RX gains
+    cmd[0] = 0x16;
+    cmd[1] = (lnagain << 4) | vgagain;
     sendCMX994 (cmd, sizeof (cmd));
 }
 

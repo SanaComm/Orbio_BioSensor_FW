@@ -44,7 +44,7 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (23)
+#define VERSION (24)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -106,11 +106,11 @@ uint32_t frequency_to_set_khz;
 bool samples_print_enabled;
 bool run_cal_offsets;
 uint8_t lnagain, vgagain;
-#define SWEEP_INTERVAL_DEFAULT_SEC (1 * 60)
-#define ACTIVE_TIME_DEFAULT_SEC (30)
+#define SWEEP_INTERVAL_DEFAULT_SEC (10 * 60)
+#define ACTIVE_TIME_DEFAULT_SEC (0)
 static uint16_t sweep_interval_sec;
 static uint16_t active_time_sec;
-static char reportsettings[30];
+static char reportsettings[50];
 // Device name to advertise
 static uint8_t devicename[] = {'O', 'r', 'b', 'i', 'o', '-', 0, 0, 0, 0, 0, 0, 0};
 
@@ -280,7 +280,7 @@ bool getTransferEnabled (void)
     BLE Variables.
 **************************************************************************************************/
 
-#define ADVERTISING_INTERVAL_MS 2000
+#define ADVERTISING_INTERVAL_MS 500
 // The advertising set handle allocated from Bluetooth stack.
 static uint8_t advertising_set_handle;
 // To save connection handle
@@ -399,14 +399,16 @@ static void stopAdvertising (void)
 // if there is no open BLE connection to send the samples through
 static void closeConnection (void)
 {
+#ifdef BLE_KEEP_ALIVE
+    // Don't close the connection in keep alive case
+    return;
+#else
     // Close connection only if open
     if (OpenedConnectionHandle != SL_BT_INVALID_CONNECTION_HANDLE)
     {
         sl_bt_connection_close(OpenedConnectionHandle);
         PRINT_INFO ("closeConnection\n\r");
     }
-#ifndef BLE_KEEP_ALIVE
-    // If connection already closed then stop advertising here
     // else close it after closed event happens
     else
         stopAdvertising ();
@@ -1261,7 +1263,14 @@ static void run_sweep_statemachine (void)
         // Normal sweep
         if (frequency_to_set_khz == 0)
         {
-            PRINT_INFO ("Sweep for %d sec ... press any key to break\n\r", active_time_sec);
+            if (active_time_sec)
+            {
+                PRINT_INFO ("Sweep for %d sec ... press any key to break\n\r", active_time_sec);
+            }
+            else
+            {
+                PRINT_INFO ("Sweep forever ... press any key to break\n\r");
+            }
             sweepState = SWEEP_STATE_SWEEP;
         }
         // Set specific frequency
@@ -1295,7 +1304,10 @@ static void run_sweep_statemachine (void)
         case SWEEP_STATE_SWEEP:
         {
         uint32_t endtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
-        if ((endtime - starttime) < (active_time_sec * 1000))
+        // Cater for infinite sweep time
+        uint32_t temp = active_time_sec * 1000;
+        if (active_time_sec == 0) temp = INT32_MAX;
+        if ((endtime - starttime) < temp)
         {
             doOneSweep (sweepcount);
             sweepcount++;
@@ -1506,23 +1518,51 @@ static void dosetlnavgagain (uint8_t temp1, uint8_t temp2)
 
 static void dosetsweeptiming (int temp1, int temp2)
 {
-    if ((temp1 >= 10) && (temp1 <= 6000) && (temp2 >= 10) && (temp2 <= 6000))
+    if (((temp1 == 0) || ((temp1 >= 1) && (temp1 <= 6000))) && (temp2 >= 10) && (temp2 <= 6000))
     {
-        PRINT_INFO ("Set sweep wake time to %d sec, sleep time to %d sec\n\r", temp1, temp2);
+        if (temp1)
+        {
+            PRINT_INFO ("Set sweep wake time to %d sec, sleep time to %d sec\n\r", temp1, temp2);
+        }
+        else
+        {
+            PRINT_INFO ("Set sweep wake time to always awake, sleep time to %d sec\n\r", temp2);
+        }
         active_time_sec = temp1;
         sweep_interval_sec = temp2;
         // If already in sleep, then update timer to sleep till next sweep
         // Else, the old setting will still be active and device will not wake as per new setting
         if (sleepState == SLEEP_STATE_SLEEP)
         {
-            sl_sleeptimer_restart_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
-            PRINT_INFO ("Update wakeup to after %d sec\n\r", sweep_interval_sec);
+            if (temp1)
+            {
+                sl_sleeptimer_restart_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
+                PRINT_INFO ("Update to wakeup after %d sec\n\r", sweep_interval_sec);
+            }
+            else
+            {
+                sl_sleeptimer_restart_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
+                PRINT_INFO ("Wakeup and stay always awake\n\r");
+            }
         }
     }
     else
     {
         PRINT_ERROR ("ERROR: invalid arguments to set_sweep_timing: %d, %d\n\r", temp1, temp2);
     }
+}
+
+static void dosweep (void)
+{
+    if (active_module)
+    {
+        PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
+        return;
+    }
+    sweepState = SWEEP_STATE_INIT;
+    // Start timer to run sweeps after a delay
+    sl_sleeptimer_stop_timer (&timer_startsweep);
+    sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
 }
 
 static void dosetfreq (uint16_t temp)
@@ -1535,19 +1575,8 @@ static void dosetfreq (uint16_t temp)
     else
     {
         frequency_to_set_khz = temp * 1000;
+        dosweep ();
     }
-}
-static void dosweep (void)
-{
-    if (active_module)
-    {
-        PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
-        return;
-    }
-    sweepState = SWEEP_STATE_INIT;
-    // Start timer to run sweeps after a delay
-    sl_sleeptimer_stop_timer (&timer_startsweep);
-    sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
 }
 
 // Actual stopping will be done inside the Sweep state machine if sweeping.
@@ -1606,9 +1635,16 @@ static void dosetppgagc (uint8_t agconoff)
     {
         PRINT_ERROR("set_ppg_agc: incorrect argument %d\n\r", agconoff);
     }
+    else if (active_module == ACTIVE_MODULE_PPG)
+    {
+        PRINT_ERROR("set_ppg_agc: incorrect state, PPG is already on, first switch off\n\r");
+    }
     else
     {
         ppg_agc_on = agconoff;
+        // Set all channels to a fixed current which will not be adjusted by AGC
+        if (ppg_agc_on == false)
+            set_all_channels_restart_pa (&g_agc, &max86171_dev);
     }
 }
 
@@ -2192,7 +2228,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
         else if (evt->data.evt_gatt_server_user_read_request.characteristic == gattdb_report_parameters) {
           PRINT_INFO ("Got report settings from BLE client\n\r");
           memset (reportsettings, 0, sizeof (reportsettings));
-          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d", pll_gain, active_time_sec, sweep_interval_sec);
+          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d,%d,%d", pll_gain, lnagain, vgagain, active_time_sec, sweep_interval_sec);
           /* Send response to Read Request */
           sl_bt_gatt_server_send_user_read_response(
             evt->data.evt_gatt_server_user_read_request.connection,

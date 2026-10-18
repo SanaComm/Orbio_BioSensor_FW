@@ -158,8 +158,8 @@ max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_RE
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    MAX86171_PD_SETLNG_12_1us)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS1_DRVA_PA,   0x00u},             /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS1_DRVB_PA,   AGC_MIN_PA},        /* LED5_DRV            */
-    {MAX86171_REG_MEAS1_DRVC_PA,   AGC_MIN_PA},        /* LED1_DRV            */
+    {MAX86171_REG_MEAS1_DRVB_PA,   AGC_PA_TABLE_INIT}, /* LED5_DRV            */
+    {MAX86171_REG_MEAS1_DRVC_PA,   AGC_PA_TABLE_INIT}, /* LED1_DRV            */
 },
 
 // MEAS2 [1] — 536nm Green CT (center)
@@ -190,8 +190,8 @@ max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_RE
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    MAX86171_PD_SETLNG_12_1us)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS2_DRVA_PA,   0x00u},             /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS2_DRVB_PA,   AGC_MIN_PA},        /* LED5_DRV            */
-    {MAX86171_REG_MEAS2_DRVC_PA,   AGC_MIN_PA},        /* LED1_DRV            */
+    {MAX86171_REG_MEAS2_DRVB_PA,   AGC_PA_TABLE_INIT}, /* LED5_DRV            */
+    {MAX86171_REG_MEAS2_DRVC_PA,   AGC_PA_TABLE_INIT}, /* LED1_DRV            */
 },
 
 // MEAS3 [2] — 950nm IR
@@ -221,9 +221,9 @@ max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_RE
         MAX86171_F_MAKE(MAX86171_MEAS_LED_SETLNG,   MAX86171_LED_SETLNG_12_us) | /* Default 12us */
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    MAX86171_PD_SETLNG_12_1us)}, /* Default 12.1us */
 
-    {MAX86171_REG_MEAS3_DRVA_PA,   AGC_MIN_PA},        /* LED7_DRV            */
+    {MAX86171_REG_MEAS3_DRVA_PA,   AGC_PA_TABLE_INIT}, /* LED7_DRV            */
     {MAX86171_REG_MEAS3_DRVB_PA,   0x00u},             /* LED3_DRV disabled   */
-    {MAX86171_REG_MEAS3_DRVC_PA,   AGC_MIN_PA},        /* LED3_DRV            */
+    {MAX86171_REG_MEAS3_DRVC_PA,   AGC_PA_TABLE_INIT}, /* LED3_DRV            */
 },
 
 // MEAS4 [3] — 950nm IR
@@ -253,9 +253,9 @@ max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_RE
         MAX86171_F_MAKE(MAX86171_MEAS_LED_SETLNG,   MAX86171_LED_SETLNG_12_us) | /* Default 12us */
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    MAX86171_PD_SETLNG_12_1us)}, /* Default 12.1us */
 
-    {MAX86171_REG_MEAS4_DRVA_PA,   AGC_MIN_PA},        /* LED7_DRV            */
+    {MAX86171_REG_MEAS4_DRVA_PA,   AGC_PA_TABLE_INIT}, /* LED7_DRV            */
     {MAX86171_REG_MEAS4_DRVB_PA,   0x00u},             /* LED3_DRV disabled   */
-    {MAX86171_REG_MEAS4_DRVC_PA,   AGC_MIN_PA},        /* LED3_DRV            */
+    {MAX86171_REG_MEAS4_DRVC_PA,   AGC_PA_TABLE_INIT}, /* LED3_DRV            */
 },
 
 // MEAS5 [4] — 660nm Red
@@ -317,9 +317,9 @@ max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_RE
         MAX86171_F_MAKE(MAX86171_MEAS_LED_SETLNG,   MAX86171_LED_SETLNG_12_us) | /* Default 12us */
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    MAX86171_PD_SETLNG_12_1us)}, /* Default 12.1us */
 
-    {MAX86171_REG_MEAS6_DRVA_PA,   AGC_MIN_PA},        /* LED2_DRV            */
+    {MAX86171_REG_MEAS6_DRVA_PA,   AGC_PA_TABLE_INIT}, /* LED2_DRV            */
     {MAX86171_REG_MEAS6_DRVB_PA,   0x00u},             /* LED2_DRV disabled   */
-    {MAX86171_REG_MEAS6_DRVC_PA,   AGC_MIN_PA},        /* LED6_DRV            */
+    {MAX86171_REG_MEAS6_DRVC_PA,   AGC_PA_TABLE_INIT}, /* LED6_DRV            */
 },
 
 // MEAS7 [6] — 526nm Green SFH (outer)
@@ -351,8 +351,8 @@ max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_RE
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    MAX86171_PD_SETLNG_12_1us)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS7_DRVA_PA,   0x00u},             /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS7_DRVB_PA,   AGC_MIN_PA},        /* LED8_DRV            */
-    {MAX86171_REG_MEAS7_DRVC_PA,   AGC_MIN_PA},        /* LED9_DRV            */
+    {MAX86171_REG_MEAS7_DRVB_PA,   AGC_PA_TABLE_INIT}, /* LED8_DRV            */
+    {MAX86171_REG_MEAS7_DRVC_PA,   AGC_PA_TABLE_INIT}, /* LED9_DRV            */
 },
 
 // MEAS8 [7] — 526nm Green SFH (outer)
@@ -383,8 +383,8 @@ max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_RE
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    MAX86171_PD_SETLNG_12_1us)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS8_DRVA_PA,   0x00u},             /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS8_DRVB_PA,   AGC_MIN_PA},        /* LED8_DRV            */
-    {MAX86171_REG_MEAS8_DRVC_PA,   AGC_MIN_PA},        /* LED9_DRV            */
+    {MAX86171_REG_MEAS8_DRVB_PA,   AGC_PA_TABLE_INIT}, /* LED8_DRV            */
+    {MAX86171_REG_MEAS8_DRVC_PA,   AGC_PA_TABLE_INIT}, /* LED9_DRV            */
 },
 
 // MEAS9 [8] — Ambient (all drivers PA=0)

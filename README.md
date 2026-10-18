@@ -11,6 +11,17 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v24:
+- Reduced advertising interval to 500 msec for faster connection with PC app
+- Added option to keep sweep awake always for testing and reduced wake time lower limit to 1 second
+- Don't close connection after sweep in BLE_KEEP_ALIVE case as it will reconnect in sleep anyway
+- Set fixed LED currents when PPG AGC is set off
+- Target amplitude 20% and allowed range 10-40%
+- Slower PPG AGC windowing with 100 samples when in range
+- Cooldown done via sample count and not window count due to above change
+- Single channel used for proximity detect in both directions
+- Added LNA and VGA gains to report settings response
+
 ==> orbio_biosensor_v23:
 - Improved predicted tag calculation in the case of many tag errors in a row
 - PPG AGC on for development

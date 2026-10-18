@@ -99,8 +99,8 @@ static const sl_cli_command_info_t cmd_stop_sweep =
                     });
 
 static const sl_cli_command_info_t cmd_set_sweep_timing =
-    SL_CLI_COMMAND(cli_set_sweep_timing, "Set sweep wake and sleep times in seconds (default 30, 600)\r",
-                    "wake time 10 to 6000\r" SL_CLI_UNIT_SEPARATOR "sleep time 10 to 6000\r" SL_CLI_UNIT_SEPARATOR,
+    SL_CLI_COMMAND(cli_set_sweep_timing, "Set sweep wake and sleep times in seconds (default 0, 600)\r",
+                    "wake time 1 to 6000, special case 0 = always awake\r" SL_CLI_UNIT_SEPARATOR "sleep time 10 to 6000\r" SL_CLI_UNIT_SEPARATOR,
                     {
                         SL_CLI_ARG_UINT16,
                         SL_CLI_ARG_UINT16,
@@ -109,7 +109,7 @@ static const sl_cli_command_info_t cmd_set_sweep_timing =
 
 static const sl_cli_command_info_t cmd_set_freq =
     SL_CLI_COMMAND(cli_set_freq, "Set desired frequency\r",
-                    "freq 700 MHz to 1080 MHz in steps of 10 MHz\r" SL_CLI_UNIT_SEPARATOR,
+                    "freq 700 MHz to 1080 MHz in steps of 10 MHz. Use '<' and '>' to move backward and forward in frequencies\r" SL_CLI_UNIT_SEPARATOR,
                     {
                         SL_CLI_ARG_UINT16,
                         SL_CLI_ARG_END,
@@ -146,21 +146,24 @@ static const sl_cli_command_info_t cmd_print_fw_ver =
 
 static sl_cli_command_entry_t custom_cmd_table[] =
 {
-    {"set_trigfreq", &cmd_set_trigfreq, false},
+    {"dosweep", &cmd_dosweep, false},
+    {"stop_sweep", &cmd_stop_sweep, false},
     {"set_iq_offsets", &cmd_set_iq_offsets, false},
+    {"set_freq", &cmd_set_freq, false},
+    {"cal_offsets", &cmd_cal_offsets, false},
     {"set_lna_vga_gain", &cmd_set_lna_vga_gain, false},
-    {"start_accel", &cmd_start_accel, false},
-    {"stop_accel", &cmd_stop_accel, false},
+    {"set_sweep_timing", &cmd_set_sweep_timing, false},
+    {"set_trigfreq", &cmd_set_trigfreq, false},
+
 #ifdef USE_PPG
     {"start_ppg", &cmd_start_ppg, false},
     {"stop_ppg", &cmd_stop_ppg, false},
     {"set_ppg_agc", &cmd_set_ppg_agc, false},
 #endif
-    {"set_sweep_timing", &cmd_set_sweep_timing, false},
-    {"dosweep", &cmd_dosweep, false},
-    {"stop_sweep", &cmd_stop_sweep, false},
-    {"set_freq", &cmd_set_freq, false},
-    {"cal_offsets", &cmd_cal_offsets, false},
+
+    {"start_accel", &cmd_start_accel, false},
+    {"stop_accel", &cmd_stop_accel, false},
+
     {"print_samples", &cmd_print_samples, false},
     {"print_unit_id", &cmd_print_unit_id, false},
     {"print_fw_ver", &cmd_print_fw_ver, false},

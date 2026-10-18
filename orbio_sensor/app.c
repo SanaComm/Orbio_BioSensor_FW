@@ -44,7 +44,7 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (26)
+#define VERSION (27)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -52,6 +52,16 @@
 #define PRINT_DEBUG printf
 #define PRINT_ERROR printf
 #define PRINT_IGNORE(...)
+
+/**************************************************************************************************
+    BLE Variables.
+**************************************************************************************************/
+
+#define ADVERTISING_INTERVAL_MS 500
+// The advertising set handle allocated from Bluetooth stack.
+static uint8_t advertising_set_handle;
+// To save connection handle
+static int OpenedConnectionHandle;
 
 /**************************************************************************************************
     Active module Defines and Variables.
@@ -82,7 +92,6 @@ static const char *getModuleName(app_module_t module)
 // TODO: What if a module is stopped from CLI or BLE, and there is a timer/interrupt that just triggers
 // TODO: Current handleNewPacket does not work if two or more packet types have to be interspersed
 // TODO: VBAT_ADC periodic read and battery status check
-// TODO: Wake/sleep cycle for PPG & Accel modes
 
 /**************************************************************************************************
     Sleep/Wake States Defines and Variables.
@@ -104,7 +113,9 @@ uint8_t pll_gain;
 uint8_t sync_mode;
 uint32_t frequency_to_set_khz;
 bool samples_print_enabled;
+#ifdef USE_CAL_SWEEP
 bool run_cal_offsets;
+#endif
 uint8_t lnagain, vgagain;
 #define SWEEP_INTERVAL_DEFAULT_SEC (10 * 60)
 #define ACTIVE_TIME_DEFAULT_SEC (0)
@@ -150,6 +161,7 @@ typedef enum
     SIGNAL_PPG = 1 << 1,
     SIGNAL_ACCEL = 1 << 2,
     SIGNAL_WAKE = 1 << 3,
+    SIGNAL_INACTIVITY = 1 << 4,
 } app_signal_t;
 
 static sl_sleeptimer_timer_handle_t timer_startsweep;
@@ -203,13 +215,60 @@ static void triggerReadAccel (void)
 }
 
 /**************************************************************************//**
+ * Inactivity check
+ *****************************************************************************/
+
+// How long to wait with no movement before going to Low Power Mode
+#define INACTIVITY_TIMEOUT_SEC (10 * 60)
+static sl_sleeptimer_timer_handle_t timer_inactivity;
+// This counter is checked every 1 second for timeout
+// It is reset periodically if BLE connection is open or Accel detects movement
+// else it increments periodically
+static uint16_t inactivity_counter;
+
+// This timer will fire every 1 second and increment a counter
+// Note: this is called from a timer tick ISR context so needs to be compact
+static void timer_cb_inactivity (sl_sleeptimer_timer_handle_t *handle, void *data)
+{
+    (void)data;
+    (void)handle;
+
+    // Already in sleep, ignore if the timer fires
+    if (sleepState == SLEEP_STATE_SLEEP) return;
+
+    PRINT_IGNORE ("Inactivity counter = %d\n\r", inactivity_counter);
+    if (inactivity_counter >= INACTIVITY_TIMEOUT_SEC)
+    {
+        if (sl_bt_external_signal (SIGNAL_INACTIVITY) != SL_STATUS_OK)
+        {
+            // Print failure but do not retry in case this gets into a loop
+            PRINT_ERROR ("ERROR: Signal from Inactivity timer failed!\n\r");
+        }
+    }
+    else
+    {
+        // Good place to check if BLE connection is open.
+        if (OpenedConnectionHandle != SL_BT_INVALID_CONNECTION_HANDLE)
+            inactivity_counter = 0;
+        else
+            inactivity_counter++;
+    }
+}
+
+/**************************************************************************//**
  * GPIO Interrupts
  *****************************************************************************/
 
-// Unused as of now
+// Used to wakeup the device from sleep based on motion
+// CLI & BLE will not be active in sleep, to achieve lowest current with EN_POWER off
+// So the only way to wake the device from EM2 sleep and start advertising is the Accel
+// After that the PC app can connect and start/stop a mode
+// When a mode is stopped, the device will go back to EM2 sleep with CLI/BLE inactive
 static void AccelInterrupt (uint8_t pin)
 {
     (void)pin;
+    // Movement detected
+    inactivity_counter = 0;
     if (sleepState == SLEEP_STATE_SLEEP)
     {
         if (sl_bt_external_signal (SIGNAL_WAKE) != SL_STATUS_OK)
@@ -221,6 +280,8 @@ static void AccelInterrupt (uint8_t pin)
         {
             PRINT_DEBUG ("Accel interrupt wake!\n\r");
             sleepState = SLEEP_STATE_WAKE;
+            // Start a 1second timer to check for inactivity
+            sl_sleeptimer_start_periodic_timer_ms (&timer_inactivity, 1000, timer_cb_inactivity, NULL, 0, 0);
         }
     }
     return;
@@ -255,23 +316,6 @@ static bool transferEnabled, sendNotification;
 static int bytesRemaining, sendTotalDataLen;
 static uint8_t *sendData;
 #define MAX_PACKET_LEN (240)
-
-#ifdef STORE_SWEEPS
-bool getTransferEnabled (void)
-{
-    return transferEnabled;
-}
-#endif
-
-/**************************************************************************************************
-    BLE Variables.
-**************************************************************************************************/
-
-#define ADVERTISING_INTERVAL_MS 500
-// The advertising set handle allocated from Bluetooth stack.
-static uint8_t advertising_set_handle;
-// To save connection handle
-static int OpenedConnectionHandle;
 
 /**************************************************************************//**
  * Utility function for creating unique advertising name
@@ -352,54 +396,52 @@ static void setupAdvertising (void)
     sl_bt_connection_set_default_data_length (251);
 }
 
+static bool advertising_is_on = false;
+
+// Called when:
+//     - starting up
+//     - connection is closed in case inactivity timeout has been reached, as the stack automatically restarts advertising.
+//     - waking up from Low Power Mode in case connection is not already open
 static void startAdvertising (void)
 {
     sl_status_t sc;
 
+    // Guard against a double call
+    if (advertising_is_on) return;
     // Start advertising and enable connections.
     sc = sl_bt_legacy_advertiser_start(advertising_set_handle, sl_bt_legacy_advertiser_connectable);
     app_assert_status(sc);
+    advertising_is_on = true;
     PRINT_INFO ("startAdvertising\n\r");
 }
 
-#ifndef BLE_KEEP_ALIVE
-
-// Called when connection is closed as the stack automatically
-// restarts advertising. This is only if BLE doesn't need
-// to be kept alive.
-// If the connection was closed by the client or due to
-// bad link, advertising will remain off till the next wake.
+// Called when connection is closed in case inactivity timeout
+// has been reached, as the stack automatically restarts advertising.
 static void stopAdvertising (void)
 {
     sl_status_t sc;
 
+    // Guard against a double call
+    if (!advertising_is_on) return;
     // Stop advertising. Returns SL_STATUS_OK if already closed as well
     sc = sl_bt_advertiser_stop(advertising_set_handle);
     app_assert_status(sc);
+    advertising_is_on = false;
     PRINT_INFO ("stopAdvertising\n\r");
 }
 
-#endif
-
-// Called from setLowPowerMode and from sl_bt_evt_connection_closed_id
-// if still in WAKE, as there is no point doing the sample collection
-// if there is no open BLE connection to send the samples through
+// Called from setLowPowerMode
 static void closeConnection (void)
 {
-#ifdef BLE_KEEP_ALIVE
-    // Don't close the connection in keep alive case
-    return;
-#else
     // Close connection only if open
     if (OpenedConnectionHandle != SL_BT_INVALID_CONNECTION_HANDLE)
     {
         sl_bt_connection_close(OpenedConnectionHandle);
         PRINT_INFO ("closeConnection\n\r");
     }
-    // else close it after closed event happens
+    // else stop advertising so that connection is not re-established
     else
         stopAdvertising ();
-#endif
 }
 
 /**************************************************************************//**
@@ -694,7 +736,8 @@ static void BOARD_pins_init(void)
 
 static void BOARD_pins_uninit (void)
 {
-    // Disable SPI pins (UART will be done in sleep hook)
+    // Disable SPI & UART pins
+    disable_UART_pins ();
     disable_SPI_pins ();
     // Disable MUXOUT input
     GPIO_PinModeSet(LO_PLL_MUX_PORT, LO_PLL_MUX_PIN, gpioModeDisabled, 0);
@@ -744,8 +787,6 @@ void my_en_power_init (void)
 
 void EMU_EFPEM23PresleepHook (void)
 {
-    // Disable pins before EM2
-    disable_UART_pins ();
     // Remove power from TCXO and RF section
     GPIO_PinOutClear(EN_POWER_PORT, EN_POWER_PIN);
 }
@@ -760,34 +801,37 @@ void EMU_EFPEM23PostsleepHook (void)
     Low Power Mode enter/exit functions (pins, BLE connection, BLE advertising)
 **************************************************************************************************/
 
-// Called when sweep is started
+// Called when sweep is started and on Accel wake
 static void unsetLowPowerMode (void)
 {
     sleepState = SLEEP_STATE_WAKE;
     // Enable required pins
     BOARD_pins_init ();
+    // Needed for CLI to function
+    sl_power_manager_add_em_requirement (SL_POWER_MANAGER_EM1);
+    PRINT_INFO ("Exit LPM\n\r");
 #ifdef USE_BLE
     // Connection was already open
     if (OpenedConnectionHandle != SL_BT_INVALID_CONNECTION_HANDLE)
     {
         PRINT_INFO ("BLE connection already open!\n\r");
     }
-#ifndef BLE_KEEP_ALIVE
-    startAdvertising ();
+    // Connection not open
+    else
+    {
+        startAdvertising ();
+    }
 #endif
-#endif
-    PRINT_INFO ("Exit LPM\n\r");
 }
 
-// Called when sweep is ended and when BLE connection is closed if not already in sleep
-// Accel is not powered off in case it is needed for wakeup
+// Called when inactivity timeout is reached
+// Accel is not powered off as it is needed for wakeup
 static void setLowPowerMode (void)
 {
     sweepState = SWEEP_STATE_INIT;
     sleepState = SLEEP_STATE_SLEEP;
-    PRINT_INFO ("Enter LPM\n\r");
 #ifdef USE_BLE
-    // Close the BLE connection if open when sweep is done
+    // Close the BLE connection if open
     closeConnection ();
 #endif
     // Disable PPG1/PPG2 and Shutdown MAX86171
@@ -796,6 +840,9 @@ static void setLowPowerMode (void)
     shutoffRFICs ();
     // Disable IADC
     disableIADC ();
+    PRINT_INFO ("Enter LPM\n\r");
+    // Now it's okay to go to EM2 in sleep
+    sl_power_manager_remove_em_requirement (SL_POWER_MANAGER_EM1);
     // Disable used pins
     BOARD_pins_uninit ();
 }
@@ -903,25 +950,24 @@ static void stopLedTimer (void)
     if (active_module == 0)
 #endif
     {
+        PRINT_INFO ("sLT %d\n\r", active_module);
         // Stop the timer
         sl_sleeptimer_stop_timer (&timer_led);
         // Disable display LEDs
         disableI2CLED ();
     }
+    else
+    {
+        PRINT_INFO ("No sLT %d\n\r", active_module);
+    }
     return;
 }
-
-/**************************************************************************//**
- * Common function to stop an active module
- *****************************************************************************/
 
 static void stop_module (void)
 {
     active_module = 0;
-    // Stop LED timer for Accel status
+    // Stop LED timer
     stopLedTimer ();
-    // Go to sleep
-    setLowPowerMode ();
 }
 
 #ifdef USE_PPG
@@ -939,6 +985,8 @@ static ppg_agc_t g_agc;
 static void dostopppg (void);
 
 // Called when PPG is started
+// SPI pins are already set via unsetLowPowerMode from SIGNAL_WAKE
+// and will remain enabled until setLowPowerMode
 static void start_ppg (void)
 {
     int ret;
@@ -1359,6 +1407,9 @@ static void run_sweep_statemachine (void)
         sweepcount = 0;
         // Needed here for when sweep wakes up from sleep, or BLE / CLI command
         active_module = ACTIVE_MODULE_SWEEP;
+        // Set to operating mode
+        // TODO: Will be called twice in the case of Accel wake
+        unsetLowPowerMode ();
         // Start LED timer to display Sweep status
         startLedTimer ();
         // Normal sweep
@@ -1391,14 +1442,13 @@ static void run_sweep_statemachine (void)
         {
             PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal INIT\n\r");
         }
-#ifdef STORE_SWEEPS
-        initStoreSweep ();
-#endif
+#ifdef USE_CAL_SWEEP
         if (run_cal_offsets == true)
         {
             // Clear before running cal sweeps
             clearIQOffsets ();
         }
+#endif
         }
         break;
 
@@ -1412,7 +1462,11 @@ static void run_sweep_statemachine (void)
         {
             doOneSweep (sweepcount);
             sweepcount++;
+#ifdef USE_CAL_SWEEP
             if ((userinput == true) || (active_module == 0) || ((run_cal_offsets == true) && (sweepcount == NUM_CAL_SWEEPS)))
+#else
+            if ((userinput == true) || (active_module == 0))
+#endif
             {
                 PRINT_INFO ("Break from sweep\n\r");
                 sweepState = SWEEP_STATE_END;
@@ -1554,9 +1608,9 @@ static void run_sweep_statemachine (void)
         uint32_t bleendtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
         int bletime = (bleendtime - blestarttime) / 1000;
         (void)bletime;
-        PRINT_INFO ("Finished %d sweeps in %d sec with BLE on\n\r", sweepcount, bletime);
+        PRINT_INFO ("Finished %d sweeps in %d sec\n\r", sweepcount, bletime);
         sl_sleeptimer_stop_timer (&timer_startsweep);
-#ifdef USE_WAKEUP
+#ifdef USE_SLEEP_WAKE
         // Check if Sweep should continue
         if (active_module == ACTIVE_MODULE_SWEEP)
         {
@@ -1567,8 +1621,9 @@ static void run_sweep_statemachine (void)
         else
 #endif
         {
-            PRINT_INFO ("Sweep has been stopped, so sleep\n\r");
+            PRINT_INFO ("Sweep has been stopped\n\r");
         }
+#ifdef USE_CAL_SWEEP
         if (run_cal_offsets == true)
         {
             // Calculate clusters after running all cal sweeps
@@ -1580,6 +1635,7 @@ static void run_sweep_statemachine (void)
             }
             run_cal_offsets = false;
         }
+#endif
         stop_module ();
         }
         break;
@@ -1657,7 +1713,7 @@ static void dosetsweeptiming (int temp1, int temp2)
         {
             if (temp1)
             {
-#ifdef USE_WAKEUP
+#ifdef USE_SLEEP_WAKE
                 sl_sleeptimer_restart_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
                 PRINT_INFO ("Update to wakeup after %d sec\n\r", sweep_interval_sec);
 #endif
@@ -1686,6 +1742,7 @@ static void dosweep (void)
     // Start timer to run sweeps after a delay
     sl_sleeptimer_stop_timer (&timer_startsweep);
     sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
+    PRINT_INFO ("dosweep\n\r");
 }
 
 static void dosetfreq (uint16_t temp)
@@ -1714,7 +1771,7 @@ static void dostopsweep (void)
         return;
     }
     PRINT_INFO ("stop_sweep\n\r");
-#ifdef USE_WAKEUP
+#ifdef USE_SLEEP_WAKE
     // In case sweep was active and in sleep
     if ((is_running == true) && (sleepState == SLEEP_STATE_SLEEP))
     {
@@ -1724,6 +1781,9 @@ static void dostopsweep (void)
 #endif
     // TODO: How did active_module = 0; work in v25
     sweepState = SWEEP_STATE_END;
+    // TODO: Trigger to end the sweep. Seems logical, but what is the situation?
+    if (is_running == false)
+        triggerSweep ();
 }
 
 #ifdef USE_PPG
@@ -1776,6 +1836,8 @@ static void dosetppgagc (uint8_t agconoff)
 
 #endif
 
+// SPI pins are already set via unsetLowPowerMode from SIGNAL_WAKE
+// and will remain enabled until setLowPowerMode
 static void dostartaccel (void)
 {
     if (active_module)
@@ -1790,12 +1852,8 @@ static void dostartaccel (void)
     sl_sleeptimer_start_timer_ms (&timer_readaccel, 1000, timer_cb_readaccel, NULL, 0, 0);
     // Start LED timer to display Accel status
     startLedTimer ();
-    // Put pins in operational mode
-    enable_SPI_pins ();
     // Start with fresh data
     accelClearFifo ();
-    // Disable pins after use
-    disable_SPI_pins ();
 }
 
 static void dostopaccel (void)
@@ -1824,6 +1882,23 @@ static void doprintsamples (uint8_t temp)
 }
 
 /**************************************************************************//**
+ * Functions to stop an active module
+ *****************************************************************************/
+
+static void stop_active_module (void)
+{
+    if (active_module == ACTIVE_MODULE_SWEEP)
+        dostopsweep ();
+    else if (active_module == ACTIVE_MODULE_PPG)
+        dostopppg ();
+    else if (active_module == ACTIVE_MODULE_ACCEL)
+        dostopaccel ();
+    // Fall through to just switch off LED and go to LPM
+    else
+        stop_module ();
+}
+
+/**************************************************************************//**
  * Function for extracting parameters from BLE writes. Known issues:
  * 1) Commands which need fields are not rejected if the fields are not present.
  * 2) Commands with trailing fields are not rejected.
@@ -1848,6 +1923,8 @@ typedef enum
     CMD_ACCEL_STOP,
 
     CMD_MISC_PRINT_SAMPLES = 40,
+
+    CMD_GO_TO_LPM = 50,
 } app_commands_t;
 
 // TODO: processblesetting parses into int, but then passes the values to functions taking narrower types.
@@ -1946,10 +2023,12 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
+#ifdef USE_CAL_SWEEP
         case CMD_SWEEP_RUN_CAL_OFFSETS:
         run_cal_offsets = true;
         dosweep ();
         break;
+#endif
 
         case CMD_SWEEP_SET_LNA_VGA_GAIN:
         // Make sure we did receive these fields
@@ -1961,6 +2040,7 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
+#ifdef USE_SLEEP_WAKE
         case CMD_SWEEP_SET_TIMING:
         // Make sure we did receive these fields
         if ((temp1_exists == true) && (temp2_exists == true))
@@ -1970,6 +2050,7 @@ static void processblesetting (char *payload, int len)
             PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
         }
         break;
+#endif
 
         case CMD_SWEEP_TRIG_FREQ:
         // Make sure we did receive the field
@@ -2017,6 +2098,11 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
+        case CMD_GO_TO_LPM:
+        // Easy way to go to LPM
+        inactivity_counter = INACTIVITY_TIMEOUT_SEC;
+        break;
+
         default:
         PRINT_ERROR ("ERROR: Invalid control command %d\n\r", temp0);
         break;
@@ -2059,7 +2145,9 @@ SL_WEAK void app_init(void)
     sync_mode = 0;
     frequency_to_set_khz = 0;
     samples_print_enabled = false;
+#ifdef USE_CAL_SWEEP
     run_cal_offsets = false;
+#endif
     lnagain = 0;
     vgagain = CMX994_MAX_VGA_GAIN;
     clearIQOffsets ();
@@ -2120,21 +2208,13 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
 #ifdef USE_BLE
       setupDeviceName ();
       setupAdvertising ();
-#ifdef BLE_KEEP_ALIVE
       startAdvertising ();
 #endif
-#endif
-#ifdef CLI_KEEP_ALIVE
-      // Shutdown / sleep ICs and disable pins
-      // If CLI is available in sleep we do not need to start the sweep automatically
-      setLowPowerMode ();
-#else
-      // Set to operating mode which is sweep by default
-      unsetLowPowerMode ();
+      inactivity_counter = 0;
+      // Start a 1second timer to check for inactivity
+      sl_sleeptimer_start_periodic_timer_ms (&timer_inactivity, 1000, timer_cb_inactivity, NULL, 0, 0);
       // Start the sweep immediately
-      // Control via CLI/BLE in wake, and BLE in sleep
       sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
-#endif
       break;
 
     // -------------------------------
@@ -2192,6 +2272,10 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       sl_bt_connection_set_data_length (OpenedConnectionHandle, 251, 2120);
       // Start LED timer to display BLE status
       startLedTimer ();
+      // BLE connection counts as activity
+      inactivity_counter = 0;
+      // Advertising is off once connection opens
+      advertising_is_on = false;
 #endif
       break;
 
@@ -2199,40 +2283,25 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
     // This event indicates that a connection was closed.
     case sl_bt_evt_connection_closed_id:
 #ifdef USE_BLE
+      PRINT_INFO ("BLE connection closed\n\r");
       OpenedConnectionHandle = SL_BT_INVALID_CONNECTION_HANDLE;
       // Set to default
       transferEnabled = false;
       sendNotification = false;
       bytesRemaining = 0;
-      // If awake and collecting samples but BLE connection is lost then no
-      // point collecting samples so go to sleep
-      if (sleepState == SLEEP_STATE_WAKE)
-      {
-          PRINT_INFO ("BLE connection closed, go to sleep\n\r");
-#ifdef USE_WAKEUP
-          // Start timer to sleep till next sweep
-          sl_sleeptimer_stop_timer (&timer_startsweep);
-          sl_sleeptimer_start_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
-          PRINT_INFO ("Sleep and set wakeup after %d sec\n\r", sweep_interval_sec);
-#endif
-          // Go to sleep
-          setLowPowerMode ();
-      }
-      else
-      {
-          PRINT_INFO ("BLE connection closed and already in sleep\n\r");
-      }
+
+      // Stop active module if connection is closed
+      // User can restart from scratch.
+      stop_active_module ();
 
       // Stop LED timer for BLE status
       stopLedTimer ();
 
-      // To keep logic simple, unconditionally either start or stop advertising here
-      // depending on what is needed
-#ifdef BLE_KEEP_ALIVE
-      startAdvertising ();
-#else
-      stopAdvertising ();
-#endif
+      // Restart advertising only if we've not reached inactivity timeout
+      if (inactivity_counter >= INACTIVITY_TIMEOUT_SEC)
+          stopAdvertising ();
+      else
+          startAdvertising ();
 #endif
       break;
 
@@ -2316,6 +2385,16 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       {
           // Set to operating mode
           unsetLowPowerMode ();
+      }
+      // Inactive for too long
+      if (evt->data.evt_system_external_signal.extsignals & SIGNAL_INACTIVITY)
+      {
+          PRINT_INFO ("Inactive for too long or LPM command: go to sleep!\n\r");
+          sl_sleeptimer_stop_timer (&timer_inactivity);
+          // Stop active module
+          stop_active_module ();
+          // Go to sleep
+          setLowPowerMode ();
       }
       break;
 
@@ -2493,8 +2572,10 @@ void cli_set_freq(sl_cli_command_arg_t *arguments)
 void cli_cal_offsets(sl_cli_command_arg_t *arguments)
 {
     (void)arguments;
+#ifdef USE_CAL_SWEEP
     run_cal_offsets = true;
     dosweep ();
+#endif
 }
 
 void cli_print_samples(sl_cli_command_arg_t *arguments)
@@ -2507,6 +2588,13 @@ void cli_print_samples(sl_cli_command_arg_t *arguments)
     }
     uint8_t temp = sl_cli_get_argument_uint8(arguments, 0);
     doprintsamples (temp);
+}
+
+void cli_set_lpm(sl_cli_command_arg_t *arguments)
+{
+    (void)arguments;
+    // Easy way to go to LPM
+    inactivity_counter = INACTIVITY_TIMEOUT_SEC;
 }
 
 void cli_print_unit_id(sl_cli_command_arg_t *arguments)

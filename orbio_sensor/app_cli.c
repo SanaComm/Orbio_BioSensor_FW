@@ -17,6 +17,7 @@ void cli_set_sweep_timing(sl_cli_command_arg_t *arguments);
 void cli_set_freq(sl_cli_command_arg_t *arguments);
 void cli_cal_offsets(sl_cli_command_arg_t *arguments);
 void cli_print_samples(sl_cli_command_arg_t *arguments);
+void cli_set_lpm(sl_cli_command_arg_t *arguments);
 void cli_print_unit_id(sl_cli_command_arg_t *arguments);
 void cli_print_fw_ver(sl_cli_command_arg_t *arguments);
 
@@ -130,6 +131,13 @@ static const sl_cli_command_info_t cmd_print_samples =
                         SL_CLI_ARG_END,
                     });
 
+static const sl_cli_command_info_t cmd_set_lpm =
+    SL_CLI_COMMAND(cli_set_lpm, "Go to Low Power Mode\r",
+                    "" SL_CLI_UNIT_SEPARATOR,
+                    {
+                        SL_CLI_ARG_END,
+                    });
+
 static const sl_cli_command_info_t cmd_print_unit_id =
     SL_CLI_COMMAND(cli_print_unit_id, "Print unit ID\r",
                     "" SL_CLI_UNIT_SEPARATOR,
@@ -150,9 +158,9 @@ static sl_cli_command_entry_t custom_cmd_table[] =
     {"stop_sweep", &cmd_stop_sweep, false},
     {"set_iq_offsets", &cmd_set_iq_offsets, false},
     {"set_freq", &cmd_set_freq, false},
-    {"cal_offsets", &cmd_cal_offsets, false},
+    {"cal_offsets", &cmd_cal_offsets, true},
     {"set_lna_vga_gain", &cmd_set_lna_vga_gain, false},
-    {"set_sweep_timing", &cmd_set_sweep_timing, false},
+    {"set_sweep_timing", &cmd_set_sweep_timing, true},
     {"set_trigfreq", &cmd_set_trigfreq, false},
 
 #ifdef USE_PPG
@@ -165,6 +173,7 @@ static sl_cli_command_entry_t custom_cmd_table[] =
     {"stop_accel", &cmd_stop_accel, false},
 
     {"print_samples", &cmd_print_samples, false},
+    {"set_lpm", &cmd_set_lpm, false},
     {"print_unit_id", &cmd_print_unit_id, false},
     {"print_fw_ver", &cmd_print_fw_ver, false},
     {NULL, NULL, false},

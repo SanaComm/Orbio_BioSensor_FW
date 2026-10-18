@@ -40,11 +40,12 @@
 
 #define USE_BLE
 #define USE_PPG
-#undef BLE_KEEP_ALIVE
 #if (SL_IOSTREAM_USART_INST0_RESTRICT_ENERGY_MODE_TO_ALLOW_RECEPTION == 1)
 #define CLI_KEEP_ALIVE
 #endif
 #undef USE_ATOMIC
+#undef USE_SLEEP_WAKE
+#undef USE_CAL_SWEEP
 
 /**************************************************************************//**
  * Application Init.

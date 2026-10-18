@@ -52,6 +52,7 @@ static void waitForPLLLock (void)
 
 void doOneSweep (int sweepcount)
 {
+    (void)sweepcount;
 #ifdef MEASURE_TIMING
     uint32_t time0 = sl_sleeptimer_get_tick_count();
     storetimeindex = 0;
@@ -139,6 +140,7 @@ void doOneSweep (int sweepcount)
         }
     }
 
+#ifdef USE_CAL_SWEEP
     if (run_cal_offsets == true)
     {
         int cntr = 0;
@@ -157,6 +159,7 @@ void doOneSweep (int sweepcount)
             PRINT_SWEEP_DEBUG ("At %d, I:%d, Q:%d\n\r", i, i_sum / NUM_SAMPLES_PER_FREQ, q_sum / NUM_SAMPLES_PER_FREQ);
         }
     }
+#endif
 
     // Set back to default clock rate for other devices
     SPIDRV_SetBitrate (sl_spidrv_inst0_handle, SL_SPIDRV_INST0_BITRATE);

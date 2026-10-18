@@ -11,6 +11,23 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v27:
+- Added an inactivity timer to go to Low Power Mode if there is no activity, to save battery
+- If there is Accel movement or BLE connection is open, both count as activity
+- Tested OTA DFU process successfully
+- Hid cal_offsets, set_sweep_timing commands on CLI help as they are not currently used
+- Added new set_lpm CLI command
+- Added new Go To LPM BLE command 50
+- Added checks to make sure advertising is not started/stopped multiple times
+- Disable UART pins moved back from Presleep hook to BOARD_pins_uninit
+- Used sl_power_manager_add/remove_em_requirement to keep in EM1 when in wake, so that CLI can work
+- Stopping a mode no longer takes it to Low Power Mode, that will happen only on inactivity timeout
+- Closing a connection also no longer takes it to Low Power Mode, instead advertising is re-started if within inactivity timeout
+- Added USE_CAL_SWEEP to disable sweep calibration code
+- Sleep current is ~1.38mA, with ~45msec periodic spikes which could be due to battery charger with no battery.
+- BUGFIX: stop active module if BLE connection gets closed so that there is no remnant of state machines or timers still active
+- BUGFIX: stop_sweep needs to triggerSweep in case the timer was not active, to finish up the sweep gracefully
+
 ==> orbio_biosensor_v26:
 - BLE & CLI not used in sleep after a mode is exited, so that EN_POWER can be disabled to save current: achieved 1.4mA in sleep
 - BLE is restarted after wake from sleep via Accel interrupt signal

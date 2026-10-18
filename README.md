@@ -11,6 +11,16 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v26:
+- BLE & CLI not used in sleep after a mode is exited, so that EN_POWER can be disabled to save current: achieved 1.4mA in sleep
+- BLE is restarted after wake from sleep via Accel interrupt signal
+- Disable UART pins in Presleep hook to make sure they are off, instead of in BOARD_pins_uninit
+- Added common function stop module to clear active module, stop LED timer and set Low Power Mode
+- Increased number of software timers and BLE memory size for safety
+- Reduced number of BLE connections to 1 which is all we need
+- Disabled wake from sleep via timer for Sweep mode
+- Sleep current is ~1.41mA
+
 ==> orbio_biosensor_v25:
 - set_freq now also has wake/sleep concept, as set by set_sweep_timing
 - Removed STORE_SWEEPS code as it's not used

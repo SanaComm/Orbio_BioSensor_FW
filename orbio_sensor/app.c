@@ -44,7 +44,7 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (25)
+#define VERSION (26)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -149,6 +149,7 @@ typedef enum
     SIGNAL_SWEEP = 1 << 0,
     SIGNAL_PPG = 1 << 1,
     SIGNAL_ACCEL = 1 << 2,
+    SIGNAL_WAKE = 1 << 3,
 } app_signal_t;
 
 static sl_sleeptimer_timer_handle_t timer_startsweep;
@@ -209,7 +210,19 @@ static void triggerReadAccel (void)
 static void AccelInterrupt (uint8_t pin)
 {
     (void)pin;
-    PRINT_DEBUG ("Accel interrupt!\n\r");
+    if (sleepState == SLEEP_STATE_SLEEP)
+    {
+        if (sl_bt_external_signal (SIGNAL_WAKE) != SL_STATUS_OK)
+        {
+            // Print failure but do not retry in case this gets into a loop
+            PRINT_ERROR ("ERROR: Signal from Accel interrupt failed!\n\r");
+        }
+        else
+        {
+            PRINT_DEBUG ("Accel interrupt wake!\n\r");
+            sleepState = SLEEP_STATE_WAKE;
+        }
+    }
     return;
 }
 
@@ -228,32 +241,6 @@ static void PPGInterrupt (uint8_t pin)
 }
 
 #endif
-
-/**************************************************************************************************
-    EN_POWER/HFXO related utility functions to switch on/off
-**************************************************************************************************/
-
-// This is called from sl_platform_init before sl_clock_manager_init as HFXO will be initialised there
-// and needs EN_POWER to be powered up.
-// This is done so that all the drivers will be set based on PCLK which is based on SYSCLK = HFXO
-// Setting drivers based on HFRCODPLL will need them to be re-initialised later each time in wake
-void my_en_power_init (void)
-{
-    // Make sure GPIOs are enabled
-    CMU_ClockEnable(cmuClock_GPIO, true);
-    // Powerup PLLs, Downconvertor, Attenuator
-    GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 1);
-}
-
-void EMU_EFPEM23PresleepHook (void)
-{
-    GPIO_PinOutClear(EN_POWER_PORT, EN_POWER_PIN);
-}
-
-void EMU_EFPEM23PostsleepHook (void)
-{
-    GPIO_PinOutSet(EN_POWER_PORT, EN_POWER_PIN);
-}
 
 #ifdef USE_BLE
 
@@ -707,8 +694,7 @@ static void BOARD_pins_init(void)
 
 static void BOARD_pins_uninit (void)
 {
-    // Disable UART & SPI pins
-    disable_UART_pins ();
+    // Disable SPI pins (UART will be done in sleep hook)
     disable_SPI_pins ();
     // Disable MUXOUT input
     GPIO_PinModeSet(LO_PLL_MUX_PORT, LO_PLL_MUX_PIN, gpioModeDisabled, 0);
@@ -739,6 +725,40 @@ static void disableI2CLED (void)
     GPIO_PinModeSet(I2C0_SCL_PORT, I2C0_SCL_PIN, gpioModeDisabled, 0);
     GPIO_PinModeSet(I2C0_SDA_PORT, I2C0_SDA_PIN, gpioModeDisabled, 0);
 }
+
+/**************************************************************************************************
+    EN_POWER/HFXO related utility functions to switch on/off
+**************************************************************************************************/
+
+// This is called from sl_platform_init before sl_clock_manager_init as HFXO will be initialised there
+// and needs EN_POWER to be powered up.
+// This is done so that all the drivers will be set based on PCLK which is based on SYSCLK = HFXO
+// Setting drivers based on HFRCODPLL will need them to be re-initialised later each time in wake
+void my_en_power_init (void)
+{
+    // Make sure GPIOs are enabled
+    CMU_ClockEnable(cmuClock_GPIO, true);
+    // Powerup PLLs, Downconvertor, Attenuator
+    GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 1);
+}
+
+void EMU_EFPEM23PresleepHook (void)
+{
+    // Disable pins before EM2
+    disable_UART_pins ();
+    // Remove power from TCXO and RF section
+    GPIO_PinOutClear(EN_POWER_PORT, EN_POWER_PIN);
+}
+
+void EMU_EFPEM23PostsleepHook (void)
+{
+    // Enable power to TCXO and RF section
+    GPIO_PinOutSet(EN_POWER_PORT, EN_POWER_PIN);
+}
+
+/**************************************************************************************************
+    Low Power Mode enter/exit functions (pins, BLE connection, BLE advertising)
+**************************************************************************************************/
 
 // Called when sweep is started
 static void unsetLowPowerMode (void)
@@ -801,6 +821,109 @@ static void setup_interrupts (void)
     GPIOINT_Init();
 }
 
+/**************************************************************************//**
+ * Display LED related
+ * Centralised here instead of spread over each module / BLE.
+ * Delinked from low power mode functions.
+ *****************************************************************************/
+
+static uint8_t led_toggle;
+static sl_sleeptimer_timer_handle_t timer_led;
+#define LED_BLIP_TIME_MSEC (100)
+
+// This timer will fire when LED needs to change
+// The LED will be on for a shorter period of time to indicate which module
+// (including BLE if connection is open) is active and off for the remainder of 1 second.
+// The I2C is enabled/disable here and is kept partitioned from the modes as they
+// do not need I2C for any other purpose.
+// Note: this is called from a timer tick ISR context so needs to be compact
+static void timer_cb_led (sl_sleeptimer_timer_handle_t *handle, void *data)
+{
+    (void)data;
+    (void)handle;
+    sl_sleeptimer_stop_timer (&timer_led);
+    // Cycle through LED states: active module, off, BLE (if open), off, active module, ...
+    if (led_toggle == 0)
+    {
+        // In case the timer fires when no module is active
+        if (active_module)
+            setLed (LED_1, moduleLedColours[__builtin_ctz(active_module)]);
+        else
+            setLed (LED_1, COLOUR_NONE);
+        sl_sleeptimer_start_timer_ms (&timer_led, LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 1;
+    }
+    else if (led_toggle == 1)
+    {
+        setLed (LED_1, COLOUR_NONE);
+        sl_sleeptimer_start_timer_ms (&timer_led, 1000 - LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 0;
+#ifdef USE_BLE
+        if (OpenedConnectionHandle != SL_BT_INVALID_CONNECTION_HANDLE)
+            led_toggle = 2;
+#endif
+    }
+    else if (led_toggle == 2)
+    {
+        setLed (LED_1, moduleLedColours[__builtin_ctz(ACTIVE_MODULE_BLE)]);
+        sl_sleeptimer_start_timer_ms (&timer_led, LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 3;
+    }
+    else if (led_toggle == 3)
+    {
+        setLed (LED_1, COLOUR_NONE);
+        sl_sleeptimer_start_timer_ms (&timer_led, 1000 - LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 0;
+    }
+}
+
+// Start LED if not already started
+static void startLedTimer (void)
+{
+    bool is_running = false;
+    sl_sleeptimer_is_timer_running (&timer_led, &is_running);
+    if (is_running == false)
+    {
+        // Enable display LEDs
+        enableI2CLED ();
+        // Start a timer to blip the module LED briefly
+        sl_sleeptimer_stop_timer (&timer_led);
+        sl_sleeptimer_start_timer_ms (&timer_led, LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
+        led_toggle = 0;
+    }
+    return;
+}
+
+// Stop LED if not needed
+static void stopLedTimer (void)
+{
+#ifdef USE_BLE
+    if ((OpenedConnectionHandle == SL_BT_INVALID_CONNECTION_HANDLE) && (active_module == 0))
+#else
+    if (active_module == 0)
+#endif
+    {
+        // Stop the timer
+        sl_sleeptimer_stop_timer (&timer_led);
+        // Disable display LEDs
+        disableI2CLED ();
+    }
+    return;
+}
+
+/**************************************************************************//**
+ * Common function to stop an active module
+ *****************************************************************************/
+
+static void stop_module (void)
+{
+    active_module = 0;
+    // Stop LED timer for Accel status
+    stopLedTimer ();
+    // Go to sleep
+    setLowPowerMode ();
+}
+
 #ifdef USE_PPG
 
 /**************************************************************************//**
@@ -819,9 +942,6 @@ static void dostopppg (void);
 static void start_ppg (void)
 {
     int ret;
-    // Put pins in operational mode
-    enable_UART_pins ();
-    enable_SPI_pins ();
     // Soft reset
     ret = max86171_soft_reset(&max86171_dev);
     if (ret)
@@ -884,23 +1004,15 @@ static void start_ppg (void)
     }
     ppg_agc_init(&g_agc);
     ppg_init_done = true;
-    // Disable pins after use
-    disable_UART_pins ();
-    disable_SPI_pins ();
 }
 
 // Called when PPG is to be stopped
 static void stop_ppg (void)
 {
-    // Put pins in operational mode
-    enable_UART_pins ();
-    enable_SPI_pins ();
     // Disable PPG1/PPG2 and Shutdown MAX86171
     max86171_shutdown(&max86171_dev);
     ppg_init_done = false;
-    // Disable pins after use
-    disable_UART_pins ();
-    disable_SPI_pins ();
+    stop_module ();
 }
 
 // To be called when PPG interrupt is triggered periodically
@@ -1140,96 +1252,6 @@ static int read_accel_fifo (void)
 }
 
 /**************************************************************************//**
- * Display LED related
- * Centralised here instead of spread over each module / BLE.
- * Delinked from low power mode functions.
- *****************************************************************************/
-
-static uint8_t led_toggle;
-static sl_sleeptimer_timer_handle_t timer_led;
-#define LED_BLIP_TIME_MSEC (100)
-
-// This timer will fire when LED needs to change
-// The LED will be on for a shorter period of time to indicate which module
-// (including BLE if connection is open) is active and off for the remainder of 1 second.
-// The I2C is enabled/disable here and is kept partitioned from the modes as they
-// do not need I2C for any other purpose.
-// Note: this is called from a timer tick ISR context so needs to be compact
-static void timer_cb_led (sl_sleeptimer_timer_handle_t *handle, void *data)
-{
-    (void)data;
-    (void)handle;
-    sl_sleeptimer_stop_timer (&timer_led);
-    // Cycle through LED states: active module, off, BLE (if open), off, active module, ...
-    if (led_toggle == 0)
-    {
-        // In case the timer fires when no module is active
-        if (active_module)
-            setLed (LED_1, moduleLedColours[__builtin_ctz(active_module)]);
-        else
-            setLed (LED_1, COLOUR_NONE);
-        sl_sleeptimer_start_timer_ms (&timer_led, LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
-        led_toggle = 1;
-    }
-    else if (led_toggle == 1)
-    {
-        setLed (LED_1, COLOUR_NONE);
-        sl_sleeptimer_start_timer_ms (&timer_led, 1000 - LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
-        led_toggle = 0;
-#ifdef USE_BLE
-        if (OpenedConnectionHandle != SL_BT_INVALID_CONNECTION_HANDLE)
-            led_toggle = 2;
-#endif
-    }
-    else if (led_toggle == 2)
-    {
-        setLed (LED_1, moduleLedColours[__builtin_ctz(ACTIVE_MODULE_BLE)]);
-        sl_sleeptimer_start_timer_ms (&timer_led, LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
-        led_toggle = 3;
-    }
-    else if (led_toggle == 3)
-    {
-        setLed (LED_1, COLOUR_NONE);
-        sl_sleeptimer_start_timer_ms (&timer_led, 1000 - LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
-        led_toggle = 0;
-    }
-}
-
-// Start LED if not already started
-static void startLedTimer (void)
-{
-    bool is_running = false;
-    sl_sleeptimer_is_timer_running (&timer_led, &is_running);
-    if (is_running == false)
-    {
-        // Enable display LEDs
-        enableI2CLED ();
-        // Start a timer to blip the module LED briefly
-        sl_sleeptimer_stop_timer (&timer_led);
-        sl_sleeptimer_start_timer_ms (&timer_led, LED_BLIP_TIME_MSEC, timer_cb_led, NULL, 0, 0);
-        led_toggle = 0;
-    }
-    return;
-}
-
-// Stop LED if not needed
-static void stopLedTimer (void)
-{
-#ifdef USE_BLE
-    if ((OpenedConnectionHandle == SL_BT_INVALID_CONNECTION_HANDLE) && (active_module == 0))
-#else
-    if (active_module == 0)
-#endif
-    {
-        // Stop the timer
-        sl_sleeptimer_stop_timer (&timer_led);
-        // Disable display LEDs
-        disableI2CLED ();
-    }
-    return;
-}
-
-/**************************************************************************//**
  * Sweep related
  *****************************************************************************/
 
@@ -1337,8 +1359,6 @@ static void run_sweep_statemachine (void)
         sweepcount = 0;
         // Needed here for when sweep wakes up from sleep, or BLE / CLI command
         active_module = ACTIVE_MODULE_SWEEP;
-        // Set to operating mode
-        unsetLowPowerMode ();
         // Start LED timer to display Sweep status
         startLedTimer ();
         // Normal sweep
@@ -1536,20 +1556,19 @@ static void run_sweep_statemachine (void)
         (void)bletime;
         PRINT_INFO ("Finished %d sweeps in %d sec with BLE on\n\r", sweepcount, bletime);
         sl_sleeptimer_stop_timer (&timer_startsweep);
+#ifdef USE_WAKEUP
         // Check if Sweep should continue
         if (active_module == ACTIVE_MODULE_SWEEP)
         {
             // Start timer to sleep till next sweep
             sl_sleeptimer_start_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
-            active_module = 0;
             PRINT_INFO ("Sleep and set wakeup after %d sec\n\r", sweep_interval_sec);
         }
         else
+#endif
         {
             PRINT_INFO ("Sweep has been stopped, so sleep\n\r");
         }
-        // Stop LED timer for Sweep status
-        stopLedTimer ();
         if (run_cal_offsets == true)
         {
             // Calculate clusters after running all cal sweeps
@@ -1561,8 +1580,7 @@ static void run_sweep_statemachine (void)
             }
             run_cal_offsets = false;
         }
-        // Go to sleep and wait for timer
-        setLowPowerMode ();
+        stop_module ();
         }
         break;
 
@@ -1639,8 +1657,10 @@ static void dosetsweeptiming (int temp1, int temp2)
         {
             if (temp1)
             {
+#ifdef USE_WAKEUP
                 sl_sleeptimer_restart_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
                 PRINT_INFO ("Update to wakeup after %d sec\n\r", sweep_interval_sec);
+#endif
             }
             else
             {
@@ -1693,13 +1713,17 @@ static void dostopsweep (void)
         PRINT_ERROR ("Module %s not active\n\r", getModuleName(ACTIVE_MODULE_SWEEP));
         return;
     }
+    PRINT_INFO ("stop_sweep\n\r");
+#ifdef USE_WAKEUP
     // In case sweep was active and in sleep
-    if (is_running == true)
+    if ((is_running == true) && (sleepState == SLEEP_STATE_SLEEP))
     {
         // Stop timer to wake and do sweep
         sl_sleeptimer_stop_timer (&timer_startsweep);
     }
-    active_module = 0;
+#endif
+    // TODO: How did active_module = 0; work in v25
+    sweepState = SWEEP_STATE_END;
 }
 
 #ifdef USE_PPG
@@ -1711,6 +1735,7 @@ static void dostartppg (void)
         PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
         return;
     }
+    PRINT_INFO ("start_ppg\n\r");
     active_module = ACTIVE_MODULE_PPG;
     // Start LED timer to display PPG status
     startLedTimer ();
@@ -1725,11 +1750,9 @@ static void dostopppg (void)
         PRINT_ERROR ("Module %s not active\n\r", getModuleName(ACTIVE_MODULE_PPG));
         return;
     }
+    PRINT_INFO ("stop_ppg\n\r");
     // Put MAX86171 into shutdown and disable PPGs
     stop_ppg ();
-    active_module = 0;
-    // Stop LED timer for PPG status
-    stopLedTimer ();
 }
 
 static void dosetppgagc (uint8_t agconoff)
@@ -1760,17 +1783,18 @@ static void dostartaccel (void)
         PRINT_ERROR ("Module %s already active\n\r", getModuleName(active_module));
         return;
     }
+    PRINT_INFO ("start_accel\n\r");
     active_module = ACTIVE_MODULE_ACCEL;
     // Start timer to read Accel after 1 second
     sl_sleeptimer_stop_timer (&timer_readaccel);
     sl_sleeptimer_start_timer_ms (&timer_readaccel, 1000, timer_cb_readaccel, NULL, 0, 0);
     // Start LED timer to display Accel status
     startLedTimer ();
-    // TODO: Put pins in operational mode
+    // Put pins in operational mode
     enable_SPI_pins ();
     // Start with fresh data
     accelClearFifo ();
-    // TODO: Disable pins after use
+    // Disable pins after use
     disable_SPI_pins ();
 }
 
@@ -1781,11 +1805,10 @@ static void dostopaccel (void)
         PRINT_ERROR ("Module %s not active\n\r", getModuleName(ACTIVE_MODULE_ACCEL));
         return;
     }
+    PRINT_INFO ("stop_accel\n\r");
     // Stop timer to read Accel after 1 second
     sl_sleeptimer_stop_timer (&timer_readaccel);
-    active_module = 0;
-    // Stop LED timer for Accel status
-    stopLedTimer ();
+    stop_module ();
 }
 
 static void doprintsamples (uint8_t temp)
@@ -2106,6 +2129,8 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       // If CLI is available in sleep we do not need to start the sweep automatically
       setLowPowerMode ();
 #else
+      // Set to operating mode which is sweep by default
+      unsetLowPowerMode ();
       // Start the sweep immediately
       // Control via CLI/BLE in wake, and BLE in sleep
       sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
@@ -2184,11 +2209,13 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       if (sleepState == SLEEP_STATE_WAKE)
       {
           PRINT_INFO ("BLE connection closed, go to sleep\n\r");
+#ifdef USE_WAKEUP
           // Start timer to sleep till next sweep
           sl_sleeptimer_stop_timer (&timer_startsweep);
           sl_sleeptimer_start_timer_ms (&timer_startsweep, sweep_interval_sec * 1000L, timer_cb_startsweep, NULL, 0, 0);
           PRINT_INFO ("Sleep and set wakeup after %d sec\n\r", sweep_interval_sec);
-          // Go to sleep and wait for timer
+#endif
+          // Go to sleep
           setLowPowerMode ();
       }
       else
@@ -2228,19 +2255,19 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
             bytesRemaining = 0;
             sweepcount = 0;
             blestarttime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
-            PRINT_INFO ("Sweep data Notifications turned on by the App\n\r");
+            PRINT_INFO ("Data Notifications turned on by the App\n\r");
           }
           else if (ccf == sl_bt_gatt_indication) {
             transferEnabled = false;
             sendNotification = false;
             bytesRemaining = 0;
-            PRINT_INFO ("Sweep data Indications turned on by the App: not supported as it is slow\n\r");
+            PRINT_INFO ("Data Indications turned on by the App: not supported as it is slow\n\r");
           } else if (evt->data.evt_gatt_server_characteristic_status.client_config_flags == 0x00) {
             /* Transfers have been turned OFF by the client */
             transferEnabled = false;
             sendNotification = false;
             bytesRemaining = 0;
-            PRINT_INFO ("Sweep data transfers turned off by the App\n\r");
+            PRINT_INFO ("Data transfers turned off by the App\n\r");
           }
         }
         break;
@@ -2254,16 +2281,10 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       // Accel data rate: 25 Hz, 3 axes, 2 bytes per axis = 150 bytes per second data
       if (evt->data.evt_system_external_signal.extsignals & SIGNAL_ACCEL)
       {
-          // Put pins in operational mode
-          enable_UART_pins ();
-          enable_SPI_pins ();
           int num = read_accel_fifo ();
 #ifdef USE_BLE
           handleNewPacket (ACTIVE_MODULE_ACCEL, (uint8_t *)resultArrayAccel, num * NUM_BYTES_PER_ACCEL_SAMPLE);
 #endif
-          // Disable pins after use
-          disable_UART_pins ();
-          disable_SPI_pins ();
           sl_sleeptimer_stop_timer (&timer_readaccel);
           // Check if Accel should continue
           if (active_module == ACTIVE_MODULE_ACCEL)
@@ -2279,15 +2300,9 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
           // Don't respond to interrupts if not initialised yet
           if (ppg_init_done)
           {
-              // Put pins in operational mode
-              enable_UART_pins ();
-              enable_SPI_pins ();
               // Read the PPG FIFO and parse if no errors during the read
               if (read_ppg_fifo () == true)
                   parse_ppg_fifo ();
-              // Disable pins after use
-              disable_UART_pins ();
-              disable_SPI_pins ();
           }
       }
 #endif
@@ -2295,6 +2310,12 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       if (evt->data.evt_system_external_signal.extsignals & SIGNAL_SWEEP)
       {
           run_sweep_statemachine ();
+      }
+      // Wake via Accel interrupt
+      if (evt->data.evt_system_external_signal.extsignals & SIGNAL_WAKE)
+      {
+          // Set to operating mode
+          unsetLowPowerMode ();
       }
       break;
 

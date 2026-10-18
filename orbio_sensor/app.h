@@ -40,7 +40,7 @@
 
 #define USE_BLE
 #define USE_PPG
-#define BLE_KEEP_ALIVE
+#undef BLE_KEEP_ALIVE
 #if (SL_IOSTREAM_USART_INST0_RESTRICT_ENERGY_MODE_TO_ALLOW_RECEPTION == 1)
 #define CLI_KEEP_ALIVE
 #endif
@@ -116,8 +116,8 @@ extern bool run_cal_offsets;
  * ADC related
  *****************************************************************************/
 // Choose one of these three
-#define PRECISION_20BIT
-#undef PRECISION_15BIT
+#undef PRECISION_20BIT
+#define PRECISION_15BIT
 #undef PRECISION_12BIT
 #ifdef PRECISION_20BIT
 #define RESULT_TYPE int32_t

@@ -43,7 +43,7 @@
 #include "ppg_agc.h"
 #include "accel.h"
 
-#define VERSION (15)
+#define VERSION (16)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -107,7 +107,7 @@ bool iq_print_enabled;
 #define ACTIVE_TIME_DEFAULT_SEC (30)
 static uint16_t sweep_interval_sec;
 static uint16_t active_time_sec;
-static char reportsettings[30];
+static char reportsettings[40];
 // Device name to advertise
 static uint8_t devicename[] = {'O', 'r', 'b', 'i', 'o', '-', 0, 0, 0, 0, 0, 0, 0};
 
@@ -214,7 +214,6 @@ static void AccelInterrupt (uint8_t pin)
 static void PPGInterrupt (uint8_t pin)
 {
     (void)pin;
-    PRINT_DEBUG ("PPG interrupt!\n\r");
     if (sl_bt_external_signal (SIGNAL_PPG) != SL_STATUS_OK)
     {
         // Print failure but do not retry in case this gets into a loop
@@ -253,13 +252,18 @@ static void switch_off_en_power_hfxo (app_module_t x)
     if (hfxo_enable_bits == 0)
     {
         sl_status_t sc;
+        PRINT_INFO ("Wait till BLE stack says okay to sleep ...");
+        while (sli_bt_is_ok_to_sleep () == false);
+        PRINT_INFO ("OK!\n\r\n\r");
         // Switch back to HFRCO (e.g., when Bluetooth radio is idle)
         sc = sli_clock_manager_hal_set_sysclk_source (SL_OSCILLATOR_HFRCODPLL);
         app_assert_status(sc);
         // Wait a while for HFRCO to settle
-        sl_sleeptimer_delay_millisecond (10);
+        sl_sleeptimer_delay_millisecond (100);
         // And then remove power from PLLs, Downconvertor, TCXO
         GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 0);
+        // Wait a while for EN_POWER to settle
+        sl_sleeptimer_delay_millisecond (100);
     }
 }
 
@@ -276,7 +280,7 @@ static void switch_on_en_power_hfxo (app_module_t x)
         // First powerup PLLs, Downconvertor, TCXO
         GPIO_PinModeSet(EN_POWER_PORT, EN_POWER_PIN, gpioModePushPull, 1);
         // Wait a while for power to various ICs to settle
-        sl_sleeptimer_delay_millisecond (10);
+        sl_sleeptimer_delay_millisecond (100);
         // And then switch to HFXO (e.g., before/at start of Bluetooth radio activity)
         sc = sli_clock_manager_hal_set_sysclk_source (SL_OSCILLATOR_HFXO);
         app_assert_status(sc);
@@ -838,7 +842,6 @@ static uint8_t fifo_buf[MAX_FIFO_SAMPLES * 3];
 static uint16_t samplecount;
 static bool tag1found;
 static ppg_agc_t g_agc;
-static max86171_irq_status_t irq;
 static void dostopppg (void);
 
 // Called when PPG is started
@@ -870,7 +873,7 @@ static void start_ppg (void)
     while (1)
     {
         // Read and clear all status bits
-        ret = max86171_irq_read_clear(&max86171_dev, &irq);
+        ret = max86171_status_read_clear(&max86171_dev);
         if (ret)
         {
             count--;
@@ -889,7 +892,7 @@ static void start_ppg (void)
         }
         else
         {
-            PRINT_ERROR ("max86171 PWR_RDY is good\n\r");
+            PRINT_INFO ("max86171 PWR_RDY is good\n\r");
             break;
         }
     }
@@ -920,23 +923,14 @@ static void stop_ppg (void)
 // every 100 msec.
 static bool read_ppg_fifo (void)
 {
-    int ret1, ret2, ret3;
-    /* ── Clear INT pin by reading status registers ── */
-    uint8_t status1, status2, status3;
-    ret1 = max86171_read_reg(&max86171_dev, MAX86171_REG_STATUS1, &status1, 1);
-    ret2 = max86171_read_reg(&max86171_dev, MAX86171_REG_STATUS2, &status2, 1);
-    ret3 = max86171_read_reg(&max86171_dev, MAX86171_REG_STATUS3, &status3, 1);
-    if (ret1 || ret2 || ret3)
+    int ret1, ret2;
+
+    ret1 = max86171_status_read_clear(&max86171_dev);
+    if (ret1)
     {
-        // For now print the status clear read errors and return. If there was a
-        // read error the statuses will not clear and this could lead to an
-        // interrupt blockage.
-        PRINT_ERROR ("ERROR: max86171 status read 1: 0x%02x, 2: 0x%02x, 3: 0x%02x\n\r", ret1, ret2, ret3);
+        // For now just return. If there was a read error the status
+        // will not clear and this could lead to an interrupt blockage.
         return false;
-    }
-    else
-    {
-        PRINT_DEBUG ("max86171 status 1: 0x%02x, 2: 0x%02x, 3: 0x%02x\n\r", status1, status2, status3);
     }
 
     uint8_t cnt1, cnt2;
@@ -944,7 +938,7 @@ static bool read_ppg_fifo (void)
     ret2 = max86171_read_reg(&max86171_dev, MAX86171_REG_FIFO_COUNTER2, &cnt2, 1);
     if (ret1 || ret2)
     {
-        PRINT_ERROR ("ERROR: max86171 counter read 1: 0x%02x, 2: 0x%02x\n\r", ret1, ret2);
+        PRINT_ERROR ("ERROR: max86171 counter: 0x%02x, 2: 0x%02x\n\r", ret1, ret2);
         return false;
     }
     // Check for FIFO overflow
@@ -994,6 +988,7 @@ static uint8_t resultArrayPPG[(MAX86171_NUM_MEAS - 1) * 3 * MAX86171_NUM_FRAMES]
 // To be called after PPG FIFO data has been read
 static void parse_ppg_fifo (void)
 {
+return;
     /* ================================================================
      * Step 7 — inside while(1), after the MAX86171_INT_f block
      * Parse FIFO.
@@ -1620,23 +1615,23 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
-#ifdef USE_PPG
         case 7:
-        dostartppg ();
-        break;
-
-        case 8:
-        dostopppg ();
-        break;
-#endif
-
-        case 9:
         dostartaccel ();
         break;
 
-        case 10:
+        case 8:
         dostopaccel ();
         break;
+
+#ifdef USE_PPG
+        case 9:
+        dostartppg ();
+        break;
+
+        case 10:
+        dostopppg ();
+        break;
+#endif
 
         default:
         PRINT_ERROR ("ERROR: Invalid control command %d\n\r", temp0);
@@ -1729,13 +1724,13 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
       startAdvertising ();
 #endif
 #endif
-      // If either of these controls is available in sleep we do
-      // not need to start the sweep automatically
-#if defined(BLE_KEEP_ALIVE) || defined(CLI_KEEP_ALIVE)
-      // Explicitly shutdown / sleep ICs
+#ifdef CLI_KEEP_ALIVE
+      // Shutdown / sleep ICs and disable pins
+      // If CLI is available in sleep we do not need to start the sweep automatically
       setLowPowerMode ();
 #else
       // Start the sweep immediately
+      // Control via CLI/BLE in wake, and BLE in sleep
       sl_sleeptimer_start_timer_ms (&timer_startsweep, SWEEP_START_DELAY_MSEC, timer_cb_startsweep, NULL, 0, 0);
 #endif
       break;
@@ -1956,7 +1951,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
         else if (evt->data.evt_gatt_server_user_read_request.characteristic == gattdb_report_parameters) {
           PRINT_INFO ("Got report settings from BLE client\n\r");
           memset (reportsettings, 0, sizeof (reportsettings));
-          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d,%d", ioffset, qoffset, active_time_sec, sweep_interval_sec);
+          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d,%d,%d", pll_gain, ioffset, qoffset, active_time_sec, sweep_interval_sec);
           /* Send response to Read Request */
           sl_bt_gatt_server_send_user_read_response(
             evt->data.evt_gatt_server_user_read_request.connection,

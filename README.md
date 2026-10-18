@@ -12,6 +12,15 @@
 
 Description of most recent firmware version changes:
 
+orbio_biosensor_v16:
+- Added wait for BLE operations to stop before switching off HFXO/EN_POWER
+- Change A_FULL interrupt to no repeat else it triggers before status read and cleared
+- BUGFIX: Corrected PWR_RDY interpretation
+- Added more MAX86171 status bit prints
+- Removed unused MAX86171 functions
+- Added pll_gain to report settings BLE response
+- Changed LFRCO to high precision mode for use instead of LFXO
+
 ==> orbio_biosensor_v15:
 - Version used for new board bringup
 - Added USE_PPG option for new board without optical section

@@ -145,7 +145,7 @@
 // <e> LFXO Settings (if Low Frequency crystal is used)
 // <i> Enable to configure LFXO
 #ifndef SL_CLOCK_MANAGER_LFXO_EN
-#define SL_CLOCK_MANAGER_LFXO_EN    1
+#define SL_CLOCK_MANAGER_LFXO_EN    0
 #endif
 
 // <o SL_CLOCK_MANAGER_LFXO_MODE> Mode
@@ -310,7 +310,7 @@
 // <cmuPrecisionHigh=> High precision
 // <d> cmuPrecisionDefault
 #ifndef SL_CLOCK_MANAGER_LFRCO_PRECISION
-#define SL_CLOCK_MANAGER_LFRCO_PRECISION    cmuPrecisionDefault
+#define SL_CLOCK_MANAGER_LFRCO_PRECISION    cmuPrecisionHigh
 #endif
 // </h>
 

@@ -143,7 +143,7 @@ static const max86171_reg_config_t g_max86171_base_config[] = {
     {MAX86171_REG_FIFO_CFG1,    256 - MAX_FIFO_SAMPLES},  /* A_FULL threshold */
     {MAX86171_REG_FIFO_CFG2,    /* 0x0A = 0x10 */
         MAX86171_F_MAKE(MAX86171_FIFO_RO,           0) |  /* no rollover */
-        MAX86171_F_MAKE(MAX86171_FIFO_A_FULL_TYPE,  0) |  /* A_FULL = repeat */
+        MAX86171_F_MAKE(MAX86171_FIFO_A_FULL_TYPE,  1) |  /* A_FULL = no repeat */
         MAX86171_F_MAKE(MAX86171_FIFO_STAT_CLR,     0) |  /* stat clear disabled */
         MAX86171_F_MAKE(MAX86171_FIFO_FLUSH,        1)},  /* flush FIFO on init */
 
@@ -644,36 +644,16 @@ typedef enum {
 int max86171_init(max86171_t *dev);
 int max86171_soft_reset(max86171_t *dev);
 
-/* Clock & frame-rate */
-int max86171_set_sync_mode(max86171_t *dev, int mode);
-int max86171_set_frame_rate(max86171_t *dev, uint32_t fps, bool use_32768Hz);
-
 /* FIFO operations */
 int max86171_fifo_flush(max86171_t *dev);
-int max86171_fifo_discard_until_first_tag(max86171_t *dev, uint8_t first_tag);
-int max86171_fifo_read_samples(max86171_t *dev,
-                               uint16_t max_items,
-                               int *out_count,
-                               uint8_t *tags,
-                               int32_t *ch1,
-                               int32_t *ch2);
-
-/* Measurement configuration */
-int max86171_configure_measurement(max86171_t *dev, int meas_idx, const max86171_meas_cfg_t *cfg);
-int max86171_enable_measurements(max86171_t *dev, uint16_t meas_bitmask);
-
-/* PD/LED utilities */
-int max86171_set_pd_bias(max86171_t *dev, int pd_idx, max86171_pd_bias_t bias);
-int max86171_set_led_range(max86171_t *dev, max86171_led_range_t range);
 
 /* Interrupts */
-int max86171_irq_config(max86171_t *dev, uint32_t int1_en_mask, uint32_t int2_en_mask);
-int max86171_irq_read_clear(max86171_t *dev, max86171_irq_status_t *out);
+int max86171_status_read_clear(max86171_t *dev);
 
 /* Low-level register access */
 int max86171_write_reg(max86171_t *dev, uint8_t reg, const uint8_t *data, size_t len);
 int max86171_read_reg(max86171_t *dev, uint8_t reg, uint8_t *data, size_t len);
-int max86171_rmw_bits(max86171_t *dev, uint8_t reg, uint8_t mask, uint8_t value_shifted);
+int max86171_read_FIFO(max86171_t *dev, uint8_t *data, size_t len) ;
 
 /* Helper functions */
 static inline void max86171_cs_low(void) {
@@ -707,29 +687,21 @@ int max86171_verify_config(max86171_t *dev,
                            size_t max_mismatches,
                            size_t *mismatch_count);
 
-
-int max86171_read_FIFO(max86171_t *dev, uint8_t *data, size_t len) ;
-
-int max86171_set_led_current(max86171_t *dev, uint8_t meas_idx, uint8_t pa);
-int max86171_set_avg(max86171_t *dev, uint8_t meas_idx, uint8_t avg);
-
 /*
  * @brief Get number of registers in configuration table
  */
- size_t max86171_get_config_size(void);
+size_t max86171_get_config_size(void);
 
 /*
  * @brief Get register configuration entry by index
  */
- int max86171_get_config_entry(size_t index, uint8_t *addr, uint8_t *value);
+int max86171_get_config_entry(size_t index, uint8_t *addr, uint8_t *value);
+
  /**
   * @brief Shutdown the device
   */
- int max86171_shutdown(max86171_t *dev);
- /**
-  * @brief Start the device running (after configuration already loaded)
-  */
- int max86171_start_running(max86171_t *dev);
+int max86171_shutdown(max86171_t *dev);
+
 #ifdef __cplusplus
 }
 #endif

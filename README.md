@@ -11,6 +11,24 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v29:
+- Remove PWR_RDY, as it is not needed if we're already communicating with the device
+- Removed sweepStopRequested and simplified by calling setLowPowerMode after a delay to allow sweep to finish up
+- Called accelClearFifo when BLE connection is established so that fresh data is sent in packets
+- Added reading of battery level if requested, in between Sweeps. Other modes read immediately.
+- Added reading of battery level on startup, to report a real value and not default when asked the first time
+- Time calculations done in 64-bit to keep wraparound to as late as possible
+- Battery read moved to event handler instead of callback which happens in ISR context
+- Added a check for starting advertising just when going to inactivity sleep
+- Replaced app_assert_status with failure prints for clarity
+- Removed checks to make sure advertising is not started/stopped multiple times: not needed as per SiLabs manuals
+- Removed unused set_trigfreq CLI command and associated GPIO TP1 usage
+- Change default mixer VGA gain from 7 to 5 for best constellation plot
+- BUGFIX: Fixed stuck sweep where notifications are turned off but not BLE connection
+- BUGFIX: Handle PPG AGC off case after MAX86171 and AGC have been initialised, not in the command handler
+- Sleep current is ~1.38mA, with ~45msec periodic spikes which could be due to battery charger with no battery.
+- TODO: Periodic 250msec spikes of 1.78mA sometimes there and sometimes not there
+
 ==> orbio_biosensor_v28:
 - Removed sweep calibration code under USE_CAL_SWEEP and in CLI
 - Added sending of Accel data after Sweep & PPG frames

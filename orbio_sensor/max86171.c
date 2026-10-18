@@ -303,8 +303,7 @@ int max86171_status_read_clear(max86171_t *dev) {
     }
     if (MAX86171_F_GET(MAX86171_STATUS1_PWR_RDY, s1) != 0)
     {
-        PRINT_MAX86171_ERROR ("ERROR: PWR_RDY = 1\n\r");
-        return MAX86171_E_STATE;
+        PRINT_MAX86171_INFO ("ERROR: PWR_RDY = 1\n\r");
     }
     return MAX86171_OK;
 }

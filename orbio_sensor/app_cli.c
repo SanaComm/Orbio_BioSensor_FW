@@ -1,7 +1,6 @@
 #include "sl_cli_handles.h"
 #include "app.h"
 
-void cli_set_trigfreq(sl_cli_command_arg_t *arguments);
 void cli_set_iq_offsets(sl_cli_command_arg_t *arguments);
 void cli_set_lna_vga_gain(sl_cli_command_arg_t *arguments);
 void cli_start_accel(sl_cli_command_arg_t *arguments);
@@ -19,14 +18,6 @@ void cli_print_samples(sl_cli_command_arg_t *arguments);
 void cli_set_lpm(sl_cli_command_arg_t *arguments);
 void cli_print_unit_id(sl_cli_command_arg_t *arguments);
 void cli_print_fw_ver(sl_cli_command_arg_t *arguments);
-
-static const sl_cli_command_info_t cmd_set_trigfreq =
-    SL_CLI_COMMAND(cli_set_trigfreq, "Set TP1 trigger frequency (default 0)\r",
-                    "frequency 0 (All), 1 to 39 (Individual)\r" SL_CLI_UNIT_SEPARATOR,
-                    {
-                        SL_CLI_ARG_UINT8,
-                        SL_CLI_ARG_END,
-                    });
 
 static const sl_cli_command_info_t cmd_set_iq_offsets =
     SL_CLI_COMMAND(cli_set_iq_offsets, "Set I/Q Offsets (default 0) Step ranges from 25 mV to 0.2 mV depending on VGA gain\r",
@@ -152,7 +143,6 @@ static sl_cli_command_entry_t custom_cmd_table[] =
     {"set_freq", &cmd_set_freq, false},
     {"set_lna_vga_gain", &cmd_set_lna_vga_gain, false},
     {"set_sweep_timing", &cmd_set_sweep_timing, true},
-    {"set_trigfreq", &cmd_set_trigfreq, false},
 
 #ifdef USE_PPG
     {"start_ppg", &cmd_start_ppg, false},

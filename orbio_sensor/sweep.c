@@ -91,9 +91,6 @@ void doOneSweep (int sweepcount)
         uint32_t time3 = sl_sleeptimer_get_tick_count();
 #endif
 
-        // For timing measurement
-        GPIO_PinModeSet(TP1_PORT, TP1_PIN, gpioModePushPull, 1);
-
 #ifdef MEASURE_TIMING
         uint32_t time4 = sl_sleeptimer_get_tick_count();
 #endif
@@ -105,16 +102,8 @@ void doOneSweep (int sweepcount)
             resultArray[patternindex][1] = patternindex * 5 - 2000;
         }
 #else
-        // For timing measurement of a particular frequency
-        if (((((i - START_FREQ_KHZ) / FREQ_STEP_KHZ) + 1) == trigfreq) || (0 == trigfreq))
-        {
-            GPIO_PinOutClear(TP1_PORT, TP1_PIN);
-            GPIO_PinOutSet(TP1_PORT, TP1_PIN);
-        }
-        GPIO_PinOutClear(RAMP_DIR_PORT, RAMP_DIR_PIN);
         // Get all ADC samples at a frequency
         doIADC ();
-        GPIO_PinOutClear(RAMP_DIR_PORT, RAMP_DIR_PIN);
 #endif
 
 #ifdef MEASURE_TIMING

@@ -300,7 +300,7 @@ bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t
     if (in_cooldown) ch->cooldown_remain--;
 
     // Handle OVF error cases specially by lowering target window and resetting channel current
-    // TODO: Right now due to low thresholds they don't actually get changed by this logic
+    // NOTE: Right now due to low thresholds they don't actually get changed by this logic
     if (ovf_error)
     {
         bool written = false;

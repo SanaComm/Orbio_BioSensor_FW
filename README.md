@@ -11,6 +11,15 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v23:
+- Improved predicted tag calculation in the case of many tag errors in a row
+- PPG AGC on for development
+- Set only Meas5 for Prox detect and others to minimal current to save current
+- Reduced target range, fast current adjustment step, proximity sensing threshold, idle current, restart current
+- BUGFIX: After detecting proximity and setting higher current, do not run AGC immediately as that will raise the current again
+- BUGFIX: Casting unsigned constant AGC_FAST_CORRECTION_PCT to signed is needed to avoid overflow after multiplication with signed
+- AGC is switched off for Meas8 as its amplitude levels are very low
+
 ==> orbio_biosensor_v22:
 - IMPROVE: Added extraction of measurement number for OVF errors. May fail if too many channels with OVF.
 - Restarting channel from a smaller LED current if OVF is detected

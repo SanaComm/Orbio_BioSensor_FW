@@ -44,7 +44,7 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (22)
+#define VERSION (23)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -912,7 +912,7 @@ static bool read_ppg_fifo (void)
     ret1 = max86171_status_read_clear(&max86171_dev);
     if (ret1)
     {
-        // For now just return. If there was a read error the status
+        // TODO: For now just return. If there was a read error the status
         // will not clear and this could lead to an interrupt blockage.
         return false;
     }
@@ -1005,6 +1005,12 @@ static void parse_ppg_fifo (void)
         // Doesn't seem to be required. We can just handle the tags as they come and not
         // expect any sequencing. The AGC anyway acts on different measurements independently.
 
+        // Keep updating the predicted tag as we get samples
+        if (tag1found == true)
+        {
+            predicted_tag++;
+            if (predicted_tag == (MAX86171_NUM_MEAS + 1)) predicted_tag = 1;
+        }
         bool ovf_error = false;
         // Handle basic PPG tag errors
         if (tag < 1u || tag2 != tag || tag > MAX86171_NUM_MEAS)
@@ -1022,15 +1028,6 @@ static void parse_ppg_fifo (void)
                 continue;
             }
         }
-        // Skip the last (ambient) measurement
-        else if (tag == MAX86171_NUM_MEAS)
-        {
-            if (samples_print_enabled == true)
-            {
-                PRINT_INFO ("\n\r");
-            }
-            continue;
-        }
         // MAX86171 datasheet says to ignore samples till tag = 1 after a restart.
         else if ((tag1found == false) && (tag != 1))
         {
@@ -1040,9 +1037,28 @@ static void parse_ppg_fifo (void)
         {
             // tag = 1 has been found so no need to check for it in the future
             tag1found = true;
+            // This is to help find the measurement number in case the next one had OVF errors in tag
+            predicted_tag = tag;
         }
-        // This is to help find the measurement number in case the next one had OVF errors in tag
-        predicted_tag = (tag % (MAX86171_NUM_MEAS - 1)) + 1;
+
+        // If we have a good tag, check if we're in sync with predicted tag
+        if (predicted_tag != tag)
+        {
+            // Not in sync so wait for tag = 1 again
+            tag1found = false;
+            predicted_tag = 0;
+            continue;
+        }
+
+        // Skip the last (ambient) measurement
+        if (tag == MAX86171_NUM_MEAS)
+        {
+            if (samples_print_enabled == true)
+            {
+                PRINT_INFO ("\n\r");
+            }
+            continue;
+        }
 
         /* Bugfix: average the two 20-bit values after sign-extension */
         uint32_t pd1 = ((uint32_t)p1b0 << 16) | ((uint32_t)p1b1 << 8) | p1b2;
@@ -1672,6 +1688,9 @@ typedef enum
     CMD_MISC_PRINT_SAMPLES = 40,
 } app_commands_t;
 
+// TODO: processblesetting parses into int, but then passes the values to functions taking narrower types.
+// So an out-of-range BLE value can wrap before the destination function validates it.
+// For example, 256 passed to a uint8_t parameter becomes 0, which can then pass a range check.
 static void processblesetting (char *payload, int len)
 {
     // Validate arguments
@@ -1869,7 +1888,7 @@ SL_WEAK void app_init(void)
     cli_custom_cmd_init();
     // Set default value for PPG variables
     ppg_init_done = false;
-    ppg_agc_on = false;
+    ppg_agc_on = true;
     // Average both PPG1 & PPG2
     for (int i = 0; i < MAX86171_NUM_MEAS - 1; i++) PPG_Average_Type[i] = 3;
     // Set default values for variables set by command line

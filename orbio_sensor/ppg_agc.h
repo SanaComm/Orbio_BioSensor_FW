@@ -70,9 +70,9 @@ extern "C" {
  * Target band as a percentage of the positive 20-bit ADC full scale
  * (0x7FFFF = 524 287).  AGC keeps the DC average inside [LOW, HIGH].
  */
-#define AGC_LOW_THRESHOLD_PCT       60u   /* below -> raise LED   */
-#define AGC_HIGH_THRESHOLD_PCT      70u   /* above -> lower LED   */
-#define AGC_LOW_THRESHOLD_PCT_MIN   30u   /* don't go below this */
+#define AGC_LOW_THRESHOLD_PCT       10u   /* below -> raise LED   */
+#define AGC_HIGH_THRESHOLD_PCT      20u   /* above -> lower LED   */
+#define AGC_LOW_THRESHOLD_PCT_MIN   10u   /* don't go below this */
 
 /**
  * Cooldown in windows between successive PA adjustments.
@@ -94,7 +94,7 @@ extern "C" {
  * Safety cap on one fast correction.  The AGC still has the existing
  * cooldown between corrections.
  */
-#define AGC_MAX_FAST_PA_STEP         20u
+#define AGC_MAX_FAST_PA_STEP         8u
 
 /** Absolute PA register limits. */
 #define AGC_PA_MIN                   0u
@@ -118,11 +118,12 @@ extern "C" {
  *
  * Skin contact with any reasonable LED current returns hundreds of thousands
  * of counts.  Air returns near zero even at maximum LED current.
- * 15% = ~76 642 counts is conservative enough to survive motion artefacts.
+ * 5% = ~26,214 counts is conservative enough to survive motion artefacts.
  *
  * Don't keep it so low that even without proximity it's detected as on-body
  */
-#define AGC_PROX_SIGNAL_PCT         15u
+#define AGC_PROX_SIGNAL_PCT          5u  // For the stronger PD combo
+#define AGC_PROX_SIGNAL_PCT_SMALL    2u  // For the weaker PD combo
 
 /**
  * Consecutive windows the signal must stay BELOW AGC_PROX_SIGNAL_PCT
@@ -138,20 +139,25 @@ extern "C" {
 #define AGC_PROX_RECOVER_WINDOWS     2u
 
 /**
- * LED PA to use while off-body.
+ * LED PA to use while off-body for the Proximity detection measurement.
  * Keeps a dim "search light" so the sensor can re-detect skin without
  * burning power at full current.
- * A value of 5 is 0.6 mA in 31 mA and 2.4 mA in 124 mA range.
+ * LSB is 0.12 mA in 31 mA and 0.48 mA in 124 mA range.
  * Bugfix: There will not be any "search light" if the setting is 0 as originally.
  */
-#define AGC_PROX_IDLE_PA    5u
+#define AGC_PROX_IDLE_PA    3u
+
+/**
+ * LED PA to use while off-body for non-Proximity detection measurements.
+ * Kept as non-zero to get around the ppg_init logic for now.
+ */
+#define AGC_MIN_PA          1u
 
 /**
  * PA to restore when skin contact is detected again.
  * Mid-range starting point lets AGC converge without large overshoot.
- * 30 LSB =~ 3.6 mA in 31 mA range and 14.4 mA in 124 mA range.
  */
-#define AGC_PROX_RESTART_PA         20u
+#define AGC_PROX_RESTART_PA          8u
 
 /**
  * Minimum number of channels that must report off-body before
@@ -185,6 +191,7 @@ typedef struct {
     int32_t  AGC_THRESH_LOW;    /**< Target band lower range.               */
     int32_t  AGC_THRESH_HIGH;   /**< Target band upper range.               */
     int32_t  AGC_THRESH_PROX;   /**< Proximity threshold.                   */
+    int32_t  AGC_PROX_RESTART_PA;   /**< Proximity start current.           */
 
     /* ── Sample accumulator ─────────────────────────────────────────────── */
     int64_t  window_sum;        /**< Running sum over the current window.   */
@@ -217,16 +224,6 @@ typedef struct {
 /* =========================================================================
  * Public API
  * ========================================================================= */
-
-/**
- * @brief Function to set individual percentage thresholds for an AGC channel
- *
- * @param  chan  Channel number (0 to 7)
- * @param  high  Target range maximum percentage of full range
- * @param  low   Target range minimum percentage of full range
- * @param  prox  Proximity detect percentage of full range
- */
-void set_channel_thresholds (uint8_t ch_idx, uint8_t low, uint8_t high, uint8_t prox);
 
 /**
  * @brief  Initialise AGC + proximity state from the compile-time config table.

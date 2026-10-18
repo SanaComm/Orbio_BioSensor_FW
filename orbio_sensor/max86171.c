@@ -5,8 +5,8 @@
  * Updated to use correct register addresses from datasheet Rev 4
  *
  * SPI Protocol:
- * - Write: CS low -> [Reg Addr] [Data bytes...] -> CS high
- * - Read:  CS low -> [Reg Addr | 0x80] [dummy/data bytes...] -> CS high
+ * - Write: CS low -> [Reg Addr] [0x00] [Data bytes...] -> CS high
+ * - Read:  CS low -> [Reg Addr] [0x80] [dummy/data bytes...] -> CS high
  */
 
 #include "max86171.h"
@@ -59,7 +59,7 @@ static int prv_write(max86171_t *dev, uint8_t reg, const uint8_t *data, size_t l
  *
  * Protocol: [Address(8-bit)] [Read Command(8-bit)] [Received Data(8-bit)]
  * - Byte 1: Register address (A7-A0)
- * - Byte 2: 0x01 (Read command, R bit = 1)
+ * - Byte 2: 0x80 (Read command, R bit = 1)
  * - Byte 3: Received data (DO7-DO0)
  * Total: 24 clock cycles per register read
  *

@@ -80,6 +80,7 @@ extern "C" {
 #define AGC_COOLDOWN_WINDOWS         3u
 
 /** Step size per PA adjustment (1 LSB =~ 0.5 mA at 124 mA LED range). */
+/** (1 LSB =~ 0.12 mA at 31 mA LED range). */
 #define AGC_PA_STEP                  1u
 
 /** Absolute PA register limits. */

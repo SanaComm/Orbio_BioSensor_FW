@@ -11,6 +11,13 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v21:
+- Enabled IR measurements
+- Set all LEDs' starting currents to idle LED currents used by PPG AGC
+- Replaced magic numbers for fields in MAX86171 LED config tables with enums
+- Reorganised BLE command numbers by module
+- Set MAX86171 A_FULL interrupt to 9 frames so its data fits inside a 240-byte packet
+
 ==> orbio_biosensor_v20:
 - Separated max86171 tables into a separate file as keeping them in a .h file is not a good practise
 - Enable all max86171 read status error prints

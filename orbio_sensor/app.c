@@ -44,7 +44,7 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (20)
+#define VERSION (21)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -537,7 +537,7 @@ static bool sendChunk (void)
             PRINT_INFO ("PKT:%ld\n\r", (uint32_t)(new_time_now - time_now));
             time_now = new_time_now;
 #endif
-            PRINT_INFO ("All chunks sent\n\r");
+            PRINT_INFO ("A");
             ret = true;
         }
     }
@@ -565,7 +565,7 @@ static uint8_t resultArraySend[HEADER_SIZE + sizeof(int16_t) * RESULT_SIZE * NUM
 
 // Call this when a new packet is ready to send e.g. when one sweep of data is
 // collected, or PPG has collected one frame of measurements.
-static bool handleNewPacket (app_module_t source, uint8_t *dataSource, int dataSourceLen)
+static bool handleNewPacket (app_module_t source, uint8_t *dataSource, uint16_t dataSourceLen)
 {
     // True if packet was fully sent or connection not opened or previous data not fully sent
     // False if packet partially sent or send failure which needs retry i.e. send is ongoing
@@ -1032,9 +1032,9 @@ static void parse_ppg_fifo (void)
         uint32_t pd2 = ((uint32_t)p2b0 << 16) | ((uint32_t)p2b1 << 8) | p2b2;
         int32_t avg, temp = (max86171_sext20 (pd1) + max86171_sext20 (pd2)) / 2;
         if (PPG_Average_Type[tag - 1] == 1)
-            avg = pd1;
+            avg = max86171_sext20 (pd1);
         else if (PPG_Average_Type[tag - 1] == 2)
-            avg = pd2;
+            avg = max86171_sext20 (pd2);
         else
             avg = temp;
         if (samples_print_enabled == true)
@@ -1095,7 +1095,10 @@ static int read_accel_fifo (void)
         // Get one sample of Accel data (X+Y+Z) into BLE buffer
         accelGetData (ptr);
 #define MAKE_INT16(x,y) ((int16_t)(((uint16_t)y << 8) | x))
-        PRINT_INFO ("%d,%d,%d\n\r", MAKE_INT16(*ptr, *(ptr + 1)), MAKE_INT16(*(ptr + 2), *(ptr + 3)), MAKE_INT16(*(ptr + 4), *(ptr + 5)));
+        if (samples_print_enabled == true)
+        {
+            PRINT_INFO ("%d,%d,%d\n\r", MAKE_INT16(*ptr, *(ptr + 1)), MAKE_INT16(*(ptr + 2), *(ptr + 3)), MAKE_INT16(*(ptr + 4), *(ptr + 5)));
+        }
         ptr += NUM_BYTES_PER_ACCEL_SAMPLE;
     }
     return num;
@@ -1426,6 +1429,7 @@ static void run_sweep_statemachine (void)
 
 static void dosettrigfreq (uint8_t temp)
 {
+    // 0 for all frequencies, 1 to NUM_FREQS for individual selection
     if (temp <= NUM_FREQS)
     {
         PRINT_INFO ("Set TP1 trigger frequency to %d\n\r", temp);
@@ -1638,11 +1642,44 @@ static void dostopaccel (void)
     stopLedTimer ();
 }
 
+static void doprintsamples (uint8_t temp)
+{
+    if ((temp != 0) && (temp != 1))
+    {
+        PRINT_ERROR("print_samples: incorrect argument %d\n\r", temp);
+    }
+    else
+    {
+        samples_print_enabled = temp;
+    }
+}
+
 /**************************************************************************//**
  * Function for extracting parameters from BLE writes. Known issues:
  * 1) Commands which need fields are not rejected if the fields are not present.
  * 2) Commands with trailing fields are not rejected.
  *****************************************************************************/
+
+typedef enum
+{
+    CMD_SWEEP_START = 10,
+    CMD_SWEEP_STOP,
+    CMD_SWEEP_SET_IQ_OFFSETS,
+    CMD_SWEEP_SET_FREQ,
+    CMD_SWEEP_RUN_CAL_OFFSETS,
+    CMD_SWEEP_SET_LNA_VGA_GAIN,
+    CMD_SWEEP_SET_TIMING,
+    CMD_SWEEP_TRIG_FREQ,
+
+    CMD_PPG_START = 20,
+    CMD_PPG_STOP,
+    CMD_PPG_SET_AGC,
+
+    CMD_ACCEL_START = 30,
+    CMD_ACCEL_STOP,
+
+    CMD_MISC_PRINT_SAMPLES = 40,
+} app_commands_t;
 
 static void processblesetting (char *payload, int len)
 {
@@ -1666,11 +1703,6 @@ static void processblesetting (char *payload, int len)
         return;
     }
     temp0 = atoi (str);
-    if ((temp0 < 1) || (temp0 > 13))
-    {
-        PRINT_ERROR ("ERROR: Invalid BLE command\n\r");
-        return;
-    }
 
     // Continue only if there's more input
     if (k < len)
@@ -1714,15 +1746,15 @@ static void processblesetting (char *payload, int len)
 
     switch (temp0)
     {
-        case 1:
+        case CMD_SWEEP_START:
         dosweep ();
         break;
 
-        case 2:
+        case CMD_SWEEP_STOP:
         dostopsweep ();
         break;
 
-        case 3:
+        case CMD_SWEEP_SET_IQ_OFFSETS:
         // Make sure we did receive these fields
         if ((temp1_exists == true) && (temp2_exists == true))
             dosetiqoffsets (temp1, temp2);
@@ -1732,7 +1764,7 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
-        case 4:
+        case CMD_SWEEP_SET_FREQ:
         // Make sure we did receive these fields
         if (temp1_exists == true)
             dosetfreq (temp1);
@@ -1742,12 +1774,12 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
-        case 5:
+        case CMD_SWEEP_RUN_CAL_OFFSETS:
         run_cal_offsets = true;
         dosweep ();
         break;
 
-        case 6:
+        case CMD_SWEEP_SET_LNA_VGA_GAIN:
         // Make sure we did receive these fields
         if ((temp1_exists == true) && (temp2_exists == true))
             dosetlnavgagain (temp1, temp2);
@@ -1757,7 +1789,7 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
-        case 7:
+        case CMD_SWEEP_SET_TIMING:
         // Make sure we did receive these fields
         if ((temp1_exists == true) && (temp2_exists == true))
             dosetsweeptiming (temp1, temp2);
@@ -1767,7 +1799,7 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
-        case 8:
+        case CMD_SWEEP_TRIG_FREQ:
         // Make sure we did receive the field
         if (temp1_exists == true)
             dosettrigfreq (temp1);
@@ -1777,24 +1809,24 @@ static void processblesetting (char *payload, int len)
         }
         break;
 
-        case 9:
+        case CMD_ACCEL_START:
         dostartaccel ();
         break;
 
-        case 10:
+        case CMD_ACCEL_STOP:
         dostopaccel ();
         break;
 
 #ifdef USE_PPG
-        case 11:
+        case CMD_PPG_START:
         dostartppg ();
         break;
 
-        case 12:
+        case CMD_PPG_STOP:
         dostopppg ();
         break;
 
-        case 13:
+        case CMD_PPG_SET_AGC:
         if (temp1_exists == true)
             dosetppgagc (temp1);
         else
@@ -1803,6 +1835,15 @@ static void processblesetting (char *payload, int len)
         }
         break;
 #endif
+
+        case CMD_MISC_PRINT_SAMPLES:
+        if (temp1_exists == true)
+            doprintsamples (temp1);
+        else
+        {
+            PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
+        }
+        break;
 
         default:
         PRINT_ERROR ("ERROR: Invalid control command %d\n\r", temp0);
@@ -2041,6 +2082,9 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
             PRINT_INFO ("Sweep data Notifications turned on by the App\n\r");
           }
           else if (ccf == sl_bt_gatt_indication) {
+            transferEnabled = false;
+            sendNotification = false;
+            bytesRemaining = 0;
             PRINT_INFO ("Sweep data Indications turned on by the App: not supported as it is slow\n\r");
           } else if (evt->data.evt_gatt_server_characteristic_status.client_config_flags == 0x00) {
             /* Transfers have been turned OFF by the client */
@@ -2306,14 +2350,7 @@ void cli_print_samples(sl_cli_command_arg_t *arguments)
         return;
     }
     uint8_t temp = sl_cli_get_argument_uint8(arguments, 0);
-    if ((temp != 0) && (temp != 1))
-    {
-        PRINT_ERROR("print_samples: incorrect argument %d\n\r", temp);
-    }
-    else
-    {
-        samples_print_enabled = temp;
-    }
+    doprintsamples (temp);
 }
 
 void cli_print_unit_id(sl_cli_command_arg_t *arguments)

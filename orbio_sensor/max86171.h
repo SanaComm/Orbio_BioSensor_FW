@@ -125,8 +125,9 @@ typedef struct {
 #define MAX86171_MEAS_REGS         7    // Size of one MEAS block
 #define MAX86171_NUM_MEAS          9    // Use all 9 available measurements
 #define MAX86171_NUM_PPG           2    // PPG1 + PPG2
-#define MAX86171_NUM_FRAMES        10   // How often to have an interrupt
+#define MAX86171_NUM_FRAMES        9    // How often to have an interrupt
 #define MAX_FIFO_SAMPLES           (MAX86171_NUM_MEAS*MAX86171_NUM_PPG*MAX86171_NUM_FRAMES)
+                                        // Note: This assumes MAX86171_MEAS_ALL is used
 /**
  * @brief Register configuration entry
  */
@@ -173,6 +174,60 @@ typedef enum {
     MAX86171_PD_BIAS_125_250pF = 2,       // 125-250pF
     MAX86171_PD_BIAS_250_500pF = 3        // 250-500pF
 } max86171_pd_bias_t;
+
+/* PD settling time - From datasheet page 64 */
+typedef enum {
+    MAX86171_PD_SETLNG_6_1us = 0,
+    MAX86171_PD_SETLNG_12_1us = 1,
+    MAX86171_PD_SETLNG_18_1us = 2,
+    MAX86171_PD_SETLNG_24_1us = 3
+} max86171_pd_setlng_t;
+
+/* LED settling time - From datasheet page 64 */
+typedef enum {
+    MAX86171_LED_SETLNG_6_us = 0,
+    MAX86171_LED_SETLNG_12_us = 1,
+    MAX86171_LED_SETLNG_18_us = 2,
+    MAX86171_LED_SETLNG_24_us = 3
+} max86171_led_setlng_t;
+
+/* DAC offset - From datasheet page 64 */
+typedef enum {
+    MAX86171_DACOFF_0_uA = 0,
+    MAX86171_DACOFF_8_uA = 1,
+    MAX86171_DACOFF_16_uA = 2,
+    MAX86171_DACOFF_24_uA = 3
+} max86171_dacoff_t;
+
+/* Ambient light reject method - From datasheet page 63 */
+typedef enum {
+    MAX86171_FILT_SEL_CDM = 0,
+    MAX86171_FILT_SEL_FDM = 1,
+} max86171_filt_sel_t;
+
+/* SINC3 filter selection - From datasheet pages 62-63 */
+typedef enum {
+    MAX86171_SINC3_SEL_OFF = 0,
+    MAX86171_SINC3_SEL_ON = 1,
+} max86171_sinc3_sel_t;
+
+/* PPG1 PD selection - From datasheet pages 61-62 */
+typedef enum {
+    MAX86171_PPG1_PDSEL_PD1 = 0,
+    MAX86171_PPG1_PDSEL_PD3 = 1,
+} max86171_ppg1_pdsel_t;
+
+/* PPG2 PD selection - From datasheet pages 61-62 */
+typedef enum {
+    MAX86171_PPG2_PDSEL_PD2 = 0,
+    MAX86171_PPG2_PDSEL_PD4 = 1,
+} max86171_ppg2_pdsel_t;
+
+/* Direct ambient measurement selection - From datasheet page 60 */
+typedef enum {
+    MAX86171_MEAS_AMB_NORMAL = 0,
+    MAX86171_MEAS_AMB_AMBIENT = 1,
+} max86171_meas_amb_sel_t;
 
 /* Measurement configuration */
 typedef struct {

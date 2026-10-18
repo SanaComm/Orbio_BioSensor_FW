@@ -11,6 +11,12 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v25:
+- set_freq now also has wake/sleep concept, as set by set_sweep_timing
+- Removed STORE_SWEEPS code as it's not used
+- Added option to capture IADC data in 20-bit precision and pack when sending over BLE
+- Added IQ sample precision to reportsettings response so that the app knows how to handle data
+
 ==> orbio_biosensor_v24:
 - Reduced advertising interval to 500 msec for faster connection with PC app
 - Added option to keep sweep awake always for testing and reduced wake time lower limit to 1 second

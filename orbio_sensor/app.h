@@ -115,6 +115,18 @@ extern bool run_cal_offsets;
 /**************************************************************************//**
  * ADC related
  *****************************************************************************/
+// Choose one of these three
+#define PRECISION_20BIT
+#undef PRECISION_15BIT
+#undef PRECISION_12BIT
+#ifdef PRECISION_20BIT
+#define RESULT_TYPE int32_t
+#define IQPRECISION (20)
+#else
+#define RESULT_TYPE int16_t
+#define IQPRECISION (15)
+#endif
+
 void initIADC (void);
 void disableIADC (void);
 void doIADC (void);
@@ -123,7 +135,7 @@ void resetResultArray (void);
 #define NUM_INPUTS 2
 // IADC voltage reference in mV
 #define VREF_MV (3300L)
-extern int16_t resultArray[RESULT_SIZE][NUM_INPUTS];
+extern RESULT_TYPE resultArray[RESULT_SIZE][NUM_INPUTS];
 
 /**************************************************************************//**
  * 2-Means algorithm related

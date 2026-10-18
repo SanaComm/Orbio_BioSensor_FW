@@ -44,7 +44,7 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (24)
+#define VERSION (25)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -110,7 +110,7 @@ uint8_t lnagain, vgagain;
 #define ACTIVE_TIME_DEFAULT_SEC (0)
 static uint16_t sweep_interval_sec;
 static uint16_t active_time_sec;
-static char reportsettings[50];
+static char reportsettings[60];
 // Device name to advertise
 static uint8_t devicename[] = {'O', 'r', 'b', 'i', 'o', '-', 0, 0, 0, 0, 0, 0, 0};
 
@@ -564,7 +564,7 @@ static void sendNextChunk (void)
 
 #define HEADER_SIZE (10) // 3 byte syncword, 1 byte packet type, 4 bytes timestamp, 2 byte byte count
 // Sweep data is the largest out of Sweep/PPG/Accel so set array size based on it
-static uint8_t resultArraySend[HEADER_SIZE + sizeof(int16_t) * RESULT_SIZE * NUM_INPUTS];
+static uint8_t resultArraySend[HEADER_SIZE + sizeof(RESULT_TYPE) * RESULT_SIZE * NUM_INPUTS];
 
 // Call this when a new packet is ready to send e.g. when one sweep of data is
 // collected, or PPG has collected one frame of measurements.
@@ -1233,6 +1233,86 @@ static void stopLedTimer (void)
  * Sweep related
  *****************************************************************************/
 
+#ifdef PRECISION_20BIT
+/*
+ * pack_into_20 - pack an array of int32_t values that each hold a
+ * right-justified 20-bit value (bits 19:0, upper 12 bits assumed 0)
+ * down into the same array, with no gaps, 20 bits per element.
+ *
+ * number_of_data_words MUST be a multiple of 32.
+ *
+ * Why 32 at a time: 32 elements * 20 bits = 640 bits = 20 words * 32 bits,
+ * exactly. So the array packs down into fixed, independent blocks of
+ * 32 input words -> 20 output words, with no leftover/carry bits between
+ * blocks. That lets the whole thing be fully unrolled per block (no
+ * per-bit shifting loop, no branches) and done safely in place with a
+ * simple two-pointer walk: output offset (20*block) is always <= input
+ * offset (32*block), and every input word is read before its memory
+ * could ever be overwritten by that same block's output (proven by
+ * construction: C evaluates the right-hand side of an assignment, i.e.
+ * reads, before performing the store for that statement, and statements
+ * execute in increasing output-address order, so a later store can never
+ * clobber a value an earlier statement still needed).
+ *
+ * No sign extension is applied on the way in/out; if your 20-bit values
+ * are meant to be treated as signed on unpack, sign-extend after
+ * unpacking (not needed for packing itself).
+ */
+
+/* Packs 32 input words (only the low 20 bits of each are used) into
+ * 20 output words. in and out may overlap PROVIDED out <= in (i.e.
+ * out points at the same address or earlier than in), which is the
+ * case for every block when called from pack_into_20 below. */
+static inline void pack_block_32to20(const uint32_t *in, uint32_t *out)
+{
+    out[0]  = ((in[0]  >>  0) & 0xFFFFFu) <<  0 | ((in[1]  >>  0) & 0xFFFu)   << 20;
+    out[1]  = ((in[1]  >> 12) & 0xFFu)    <<  0 | ((in[2]  >>  0) & 0xFFFFFu) <<  8 | ((in[3]  >> 0) & 0xFu) << 28;
+    out[2]  = ((in[3]  >>  4) & 0xFFFFu)  <<  0 | ((in[4]  >>  0) & 0xFFFFu)  << 16;
+    out[3]  = ((in[4]  >> 16) & 0xFu)     <<  0 | ((in[5]  >>  0) & 0xFFFFFu) <<  4 | ((in[6]  >> 0) & 0xFFu) << 24;
+    out[4]  = ((in[6]  >>  8) & 0xFFFu)   <<  0 | ((in[7]  >>  0) & 0xFFFFFu) << 12;
+    out[5]  = ((in[8]  >>  0) & 0xFFFFFu) <<  0 | ((in[9]  >>  0) & 0xFFFu)   << 20;
+    out[6]  = ((in[9]  >> 12) & 0xFFu)    <<  0 | ((in[10] >>  0) & 0xFFFFFu) <<  8 | ((in[11] >> 0) & 0xFu) << 28;
+    out[7]  = ((in[11] >>  4) & 0xFFFFu)  <<  0 | ((in[12] >>  0) & 0xFFFFu)  << 16;
+    out[8]  = ((in[12] >> 16) & 0xFu)     <<  0 | ((in[13] >>  0) & 0xFFFFFu) <<  4 | ((in[14] >> 0) & 0xFFu) << 24;
+    out[9]  = ((in[14] >>  8) & 0xFFFu)   <<  0 | ((in[15] >>  0) & 0xFFFFFu) << 12;
+    out[10] = ((in[16] >>  0) & 0xFFFFFu) <<  0 | ((in[17] >>  0) & 0xFFFu)   << 20;
+    out[11] = ((in[17] >> 12) & 0xFFu)    <<  0 | ((in[18] >>  0) & 0xFFFFFu) <<  8 | ((in[19] >> 0) & 0xFu) << 28;
+    out[12] = ((in[19] >>  4) & 0xFFFFu)  <<  0 | ((in[20] >>  0) & 0xFFFFu)  << 16;
+    out[13] = ((in[20] >> 16) & 0xFu)     <<  0 | ((in[21] >>  0) & 0xFFFFFu) <<  4 | ((in[22] >> 0) & 0xFFu) << 24;
+    out[14] = ((in[22] >>  8) & 0xFFFu)   <<  0 | ((in[23] >>  0) & 0xFFFFFu) << 12;
+    out[15] = ((in[24] >>  0) & 0xFFFFFu) <<  0 | ((in[25] >>  0) & 0xFFFu)   << 20;
+    out[16] = ((in[25] >> 12) & 0xFFu)    <<  0 | ((in[26] >>  0) & 0xFFFFFu) <<  8 | ((in[27] >> 0) & 0xFu) << 28;
+    out[17] = ((in[27] >>  4) & 0xFFFFu)  <<  0 | ((in[28] >>  0) & 0xFFFFu)  << 16;
+    out[18] = ((in[28] >> 16) & 0xFu)     <<  0 | ((in[29] >>  0) & 0xFFFFFu) <<  4 | ((in[30] >> 0) & 0xFFu) << 24;
+    out[19] = ((in[30] >>  8) & 0xFFFu)   <<  0 | ((in[31] >>  0) & 0xFFFFFu) << 12;
+}
+
+/*
+ * array           : in/out. On entry, number_of_data_words elements,
+ *                   each holding a right-justified 20-bit value.
+ *                   On return, the packed bitstream occupies the first
+ *                   (number_of_data_words * 20) / 32 elements; the rest
+ *                   of the array is untouched (stale) - ignore it.
+ * number_of_data_words : MUST be a multiple of 32.
+ */
+#if (NUM_SAMPLES_PER_FREQ != 32)
+#error NUM_SAMPLES_PER_FREQ should be 32 for this code to work
+#endif
+#if (IQPRECISION != 20)
+#error IQPRECISION should be 20 for this code to work
+#endif
+void pack_into_20(int32_t *array, int number_of_data_words)
+{
+    uint32_t *a = (uint32_t *)array;
+    int nblocks = number_of_data_words / NUM_SAMPLES_PER_FREQ;
+
+    for (int b = 0; b < nblocks; b++) {
+        pack_block_32to20(a + (size_t)b * NUM_SAMPLES_PER_FREQ, a + (size_t)b * IQPRECISION);
+    }
+}
+
+#endif
+
 static uint32_t last_set_frequency;
 
 int i_avg_mV[NUM_FREQS], q_avg_mV[NUM_FREQS];
@@ -1246,6 +1326,7 @@ void clearIQOffsets (void)
 
 static void run_sweep_statemachine (void)
 {
+    int sweep_data_size = 0;
     switch (sweepState)
     {
         case SWEEP_STATE_INIT:
@@ -1320,7 +1401,15 @@ static void run_sweep_statemachine (void)
                 break;
             }
 #ifdef USE_BLE
-            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sizeof(resultArray));
+            sweep_data_size = sizeof(resultArray);
+#ifdef PRECISION_20BIT
+            // Add logic here to compress the 20-bit precision samples
+            int number_of_data_words = sweep_data_size / sizeof(RESULT_TYPE);
+            pack_into_20((RESULT_TYPE *)resultArray, number_of_data_words);
+            // Update size of BLE data after packing into bytes
+            sweep_data_size = (number_of_data_words * IQPRECISION) / 8;
+#endif
+            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sweep_data_size);
             // Trigger next sweep as data was fully sent in a single packet, or connection is not open
             if (ret == true && bytesRemaining == 0)
             {
@@ -1356,7 +1445,7 @@ static void run_sweep_statemachine (void)
         // input checks to break from active sweep are not added here.
         case SWEEP_STATE_PENDING:
         {
-            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sizeof(resultArray));
+            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sweep_data_size);
             // Trigger next sweep as data was fully sent in a single packet, or connection is not open
             if (ret == true && bytesRemaining == 0)
             {
@@ -1377,6 +1466,12 @@ static void run_sweep_statemachine (void)
         break;
 
         case SWEEP_STATE_SETFREQ:
+        {
+        uint32_t endtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+        // Cater for infinite sweep time
+        uint32_t temp = active_time_sec * 1000;
+        if (active_time_sec == 0) temp = INT32_MAX;
+        if ((endtime - starttime) < temp)
         {
             if (last_set_frequency != frequency_to_set_khz)
                 doSetFreq ();
@@ -1416,12 +1511,21 @@ static void run_sweep_statemachine (void)
             {
                 // Finish up sweep
                 sweepState = SWEEP_STATE_END;
+                // Set this only when commanded to stop and not when going to sleep
+                frequency_to_set_khz = 0;
                 last_set_frequency = 0;
             }
-            if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
-            {
-                PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal END\n\r");
-            }
+            // Continue
+            triggerSweep ();
+        }
+        else
+        {
+            sweepState = SWEEP_STATE_END;
+            last_set_frequency = 0;
+            // frequency_to_set_khz is not reset here so that when it wakes it will continue at the last set frequency
+            // Finish up sweep
+            triggerSweep ();
+        }
         }
         break;
 
@@ -1430,7 +1534,7 @@ static void run_sweep_statemachine (void)
         uint32_t bleendtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
         int bletime = (bleendtime - blestarttime) / 1000;
         (void)bletime;
-        PRINT_INFO ("Finished %d sweeps in %d sec\n\r", sweepcount, bletime);
+        PRINT_INFO ("Finished %d sweeps in %d sec with BLE on\n\r", sweepcount, bletime);
         sl_sleeptimer_stop_timer (&timer_startsweep);
         // Check if Sweep should continue
         if (active_module == ACTIVE_MODULE_SWEEP)
@@ -1444,7 +1548,6 @@ static void run_sweep_statemachine (void)
         {
             PRINT_INFO ("Sweep has been stopped, so sleep\n\r");
         }
-        frequency_to_set_khz = 0;
         // Stop LED timer for Sweep status
         stopLedTimer ();
         if (run_cal_offsets == true)
@@ -1663,11 +1766,11 @@ static void dostartaccel (void)
     sl_sleeptimer_start_timer_ms (&timer_readaccel, 1000, timer_cb_readaccel, NULL, 0, 0);
     // Start LED timer to display Accel status
     startLedTimer ();
-    // Put pins in operational mode
+    // TODO: Put pins in operational mode
     enable_SPI_pins ();
     // Start with fresh data
     accelClearFifo ();
-    // Disable pins after use
+    // TODO: Disable pins after use
     disable_SPI_pins ();
 }
 
@@ -2228,7 +2331,7 @@ void sl_bt_on_event(sl_bt_msg_t *evt)
         else if (evt->data.evt_gatt_server_user_read_request.characteristic == gattdb_report_parameters) {
           PRINT_INFO ("Got report settings from BLE client\n\r");
           memset (reportsettings, 0, sizeof (reportsettings));
-          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d,%d,%d", pll_gain, lnagain, vgagain, active_time_sec, sweep_interval_sec);
+          snprintf (reportsettings, sizeof(reportsettings) - 1, "%d,%d,%d,%d,%d,%d", IQPRECISION, pll_gain, lnagain, vgagain, active_time_sec, sweep_interval_sec);
           /* Send response to Read Request */
           sl_bt_gatt_server_send_user_read_response(
             evt->data.evt_gatt_server_user_read_request.connection,

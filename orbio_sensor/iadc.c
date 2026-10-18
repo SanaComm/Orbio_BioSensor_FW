@@ -59,11 +59,6 @@
 // For testing FIFO timing
 #undef TOGGLE_RAMP_DIR
 
-// Choose one of these three
-#undef PRECISION_20BIT
-#define PRECISION_15BIT
-#undef PRECISION_12BIT
-
 // Set CLK_ADC to 10MHz
 #define CLK_SRC_ADC_FREQ      20000000  // CLK_SRC_ADC
 #define CLK_ADC_FREQ          10000000  // CLK_ADC - 10 MHz max in normal mode
@@ -89,9 +84,9 @@
 
 static bool adc_init_done = false;
 static volatile bool conversiondone;
-int16_t resultArray[RESULT_SIZE][NUM_INPUTS];
+RESULT_TYPE resultArray[RESULT_SIZE][NUM_INPUTS];
 static volatile int resultArrayIndex;
-static int16_t *resultArrayPtr;
+static RESULT_TYPE *resultArrayPtr;
 #ifndef USE_ADC_LDMA
 static volatile int resultArrayIndexScan;
 #endif
@@ -340,7 +335,7 @@ void IADC_IRQHandler(void)
 void resetResultArray (void)
 {
     resultArrayIndex = 0;
-    resultArrayPtr = (int16_t *)&resultArray[0][0];
+    resultArrayPtr = (RESULT_TYPE *)&resultArray[0][0];
 }
 
 #ifdef USE_ADC_LDMA

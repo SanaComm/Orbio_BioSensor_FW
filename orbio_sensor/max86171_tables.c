@@ -126,6 +126,7 @@ Code  LEDx_DRV Pin 	    Code	LEDx_DRV Pin		Code	LEDx_DRV Pin
  * TODO: configuration doubts
  * 1.  Why not set SINC3 = 1 as we have TINT = 117.1us which allows this setting
  * 2.  What is the logic behind PPG1/PPG2 ADC full range settings of 16uA?
+ * 3.  As MEAS8 is giving very low results, why not disable it and let MEAS7 have MEAS_AVER=2
  */
 
 max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_REGS] = {

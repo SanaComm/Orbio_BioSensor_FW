@@ -19,22 +19,6 @@ static uint32_t storetime[STORETIME_SIZE];
 static int storetimeindex;
 #endif
 
-#ifdef STORE_SWEEPS
-
-#define NUM_STORE_SWEEPS (4)
-#define STORESWEEP_SIZE (NUM_STORE_SWEEPS * sizeof (resultArray))
-static char storesweep[STORESWEEP_SIZE];
-static unsigned int storesweepindex;
-static bool storeprintdone;
-
-void initStoreSweep (void)
-{
-    storeprintdone = false;
-    storesweepindex = 0;
-}
-
-#endif
-
 #undef USE_PATTERN
 #ifdef USE_PATTERN
 static int patternindex;
@@ -190,32 +174,9 @@ void doOneSweep (int sweepcount)
     {
         for (int i = 0; i < RESULT_SIZE; i++)
         {
-            PRINT_SWEEP_INFO ("%d,%d\n\r", resultArray[i][0], resultArray[i][1]);
+            PRINT_SWEEP_INFO ("%ld,%ld\n\r", (int32_t)resultArray[i][0], (int32_t)resultArray[i][1]);
         }
     }
-
-#ifdef STORE_SWEEPS
-    // Only store data sent over BLE
-    if (getTransferEnabled () == true)
-    {
-        // Store latest sweep
-        if (storesweepindex < (sizeof (storesweep)))
-        {
-            memcpy (&storesweep[storesweepindex], resultArray, sizeof (resultArray));
-            storesweepindex += sizeof(resultArray);
-        }
-    }
-    // Print all stored samples in the end
-    if ((storeprintdone == false) && (storesweepindex == sizeof (storesweep)))
-    {
-        int16_t *storesweepptr = (int16_t *)storesweep;
-        for (unsigned int i = 0; i < sizeof (storesweep) / sizeof (uint32_t); i++, storesweepptr += 2)
-        {
-            PRINT_SWEEP_INFO ("%d,%d\n\r", *storesweepptr, *(storesweepptr + 1));
-        }
-        storeprintdone = true;
-    }
-#endif
 }
 
 void doSetFreq (void)

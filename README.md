@@ -11,6 +11,14 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v30:
+- Allow a subset of channels to have active AGC and send data over BLE
+- Removed concept of longer cooldown windows once in AGC target zone as its value is debatable
+- MAX86171/AGC cosmetic cleanups of comments, unused code, defines, tables
+- Adjusted thresholds to allow proximity to work for wrist as well, and adjusted thresholds per channel based on amplitudes observed in testing
+- Removed OVF error handling by adjusting thresholds as we've adjusted thresholds to try and never reach this case
+- Don't allow AGC to run when possibly going off body, to prevent current surges trying to get to a target which can't be reached when going off-body
+
 ==> orbio_biosensor_v29:
 - Remove PWR_RDY, as it is not needed if we're already communicating with the device
 - Removed sweepStopRequested and simplified by calling setLowPowerMode after a delay to allow sweep to finish up

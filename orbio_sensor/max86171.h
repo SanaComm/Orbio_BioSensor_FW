@@ -125,9 +125,11 @@ typedef struct {
 #define MAX86171_MEAS_REGS         7    // Size of one MEAS block
 #define MAX86171_NUM_MEAS          9    // Use all 9 available measurements
 #define MAX86171_NUM_PPG           2    // PPG1 + PPG2
-#define MAX86171_NUM_FRAMES        9    // How often to have an interrupt
+#define MAX86171_NUM_FRAMES        9    // How often to have an interrupt (calculated from BLE packet size restriction)
+                                        // (240maxble-10header)/3byte/8meassent
+                                        // NOTE: Retain this even if less measurements are used for AGC and sending over BLE
 #define MAX_FIFO_SAMPLES           (MAX86171_NUM_MEAS*MAX86171_NUM_PPG*MAX86171_NUM_FRAMES)
-                                        // Note: This assumes MAX86171_MEAS_ALL is used
+                                        // NOTE: This assumes MAX86171_MEAS_ALL is used
 /**
  * @brief Register configuration entry
  */
@@ -137,7 +139,7 @@ typedef struct {
 } max86171_reg_config_t;
 
 extern const max86171_reg_config_t g_max86171_base_config[MAX86171_BASE_CONFIG_SIZE];
-extern max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_REGS];
+extern const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_REGS];
 
 /* =============================
  *        Public Types

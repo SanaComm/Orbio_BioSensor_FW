@@ -1,6 +1,7 @@
 /**
  * @file ppg_agc.c
  * @brief Automatic Gain Control (AGC) + Proximity Detection for MAX86171
+ *        Does not run for disabled channels
  *
  * ========================================================
  * ALGORITHM FLOW  (called once per window = AGC_WINDOW_SAMPLES samples)
@@ -13,11 +14,11 @@
  *  │                                                                    │
  *  │  ── PROXIMITY CHECK (runs always, even when AGC is suspended) ──   │
  *  │                                                                    │
- *  │  if avg < AGC_THRESH_PROX:                                         │
+ *  │  if avg < fullscale(AGC_PROX_SIGNAL_PCT):                          │
  *  │      prox_low_cnt++,  prox_high_cnt = 0                            │
  *  │      if on_body AND prox_low_cnt >= CONFIRM_WINDOWS:               │
  *  │          on_body = false                                           │
- *  │          set PA = AGC_PROX_IDLE_PA on prox channel                 │
+ *  │          set PA = AGC_PROX_SEARCHLIGHT_PA on prox channel          │
  *  │          set PA = AGC_OFFBODY_PA_NONPROX (0) on other channels     │
  *  │  else:                                                             │
  *  │      prox_high_cnt++,  prox_low_cnt = 0                            │
@@ -26,7 +27,8 @@
  *  │          set PA = AGC_PROX_RESTART_PA on all drivers               │
  *  │          set cooldown so AGC is delayed by a window                │
  *  │                                                                    │
- *  │  ── AGC STEP (only when on_body AND enabled AND cooldown == 0) ─── │
+ *  │  ── AGC STEP (only when on_body AND cooldown == 0) ───             │
+ *  │          (also skipped while prox channel's prox_low_cnt > 0)      │
  *  │                                                                    │
  *  │  if   avg < AGC_THRESH_LOW  → fast PA increase toward target       │
  *  │  elif avg > AGC_THRESH_HIGH → fast PA decrease toward target       │
@@ -48,7 +50,9 @@
  * Local configuration
  * ========================================================================= */
 
-/** Cooldown is counted in samples so it does not stretch with the long window. */
+// Cooldown is counted in samples.
+// It is a stale sample guard to prevent samples taken with older setting
+// from being used.
 #define AGC_COOLDOWN_SAMPLES        (AGC_COOLDOWN_WINDOWS * AGC_WINDOW_SAMPLES)
 
 /* =========================================================================
@@ -78,7 +82,7 @@ static inline int32_t clamp_i32(int32_t v, int32_t lo, int32_t hi){
  * @brief Set the same PA value on all active drivers of a channel
  *        and write each register to the MAX86171 via SPI.
  *        Called when moving from on-body to off-body and vice versa
- *        and from ppg_agc_force_pa().
+ *        and from set_all_channels_restart_pa() which is used in AGC off case.
  */
 static void set_pa_absolute(agc_channel_t *ch, max86171_t *dev, uint8_t pa_val){
     for (uint8_t d = 0u; d < ch->num_drv; d++) {
@@ -128,10 +132,9 @@ static bool apply_pa_delta(agc_channel_t *ch, max86171_t *dev, int16_t delta)
 }
 
 /**
- * @brief Discard the accumulator and force the fast (short) window.
+ * @brief Discard the accumulator.
  *        Must be called whenever PA is changed outside the normal AGC step,
- *        otherwise a stale in-range state would select the 100-sample window
- *        exactly when fast convergence is needed.
+ *        otherwise we have stale window variables.
  */
 static inline void reset_window_and_state(agc_channel_t *ch)
 {
@@ -150,8 +153,10 @@ static void set_all_channels_offbody(ppg_agc_t *agc, max86171_t *dev)
     for (uint8_t c = 0u; c < AGC_NUM_CHANNELS; c++)
     {
         agc_channel_t *ch = &agc->ch[c];
-        uint8_t idle_pa = (c == AGC_PROX_CH_NUM) ? AGC_PROX_IDLE_PA : AGC_OFFBODY_PA_NONPROX;
+        uint8_t idle_pa = (c == AGC_PROX_CH_NUM) ? AGC_PROX_SEARCHLIGHT_PA : AGC_OFFBODY_PA_NONPROX;
 
+        // First check if the channel is enabled
+        if (!ch->enabled) continue;
         ch->on_body = false;
         set_pa_absolute(ch, dev, idle_pa);
         // Channel is fully reset, settings will be same as in ppg_agc_init
@@ -175,15 +180,19 @@ static void set_all_channels_onbody (ppg_agc_t *agc, max86171_t *dev)
     for (uint8_t c = 0u; c < AGC_NUM_CHANNELS; c++)
     {
         agc_channel_t *ch = &agc->ch[c];
+
+        // First check if the channel is enabled
+        if (!ch->enabled) continue;
+
+        // Already on-body, don't change settings
         if (ch->on_body) continue;
 
         ch->on_body = true;
         set_pa_absolute(ch, dev, ch->AGC_PROX_RESTART_PA);
         PRINT_AGC_INFO("[PROX] ch%u  ON-BODY   PA->%u\r\n", (unsigned)c, (unsigned)ch->AGC_PROX_RESTART_PA);
-        // Skip one short window of samples taken at the old (idle) current.
+        // Skip one window of samples taken at the old (idle) current.
         // Once proximity is detected, the remaining frame samples are
         // from the Off Body current setting and should be discarded.
-        // Setting agc_state = 0 below takes care of this.
         ch->cooldown_remain = AGC_WINDOW_SAMPLES;
         ch->prox_high_cnt = AGC_PROX_RECOVER_WINDOWS;
         ch->prox_low_cnt = 0u;
@@ -193,19 +202,25 @@ static void set_all_channels_onbody (ppg_agc_t *agc, max86171_t *dev)
 
 /**
  * @brief Table to set individual percentage thresholds per AGC channel
- *        {LOW%, HIGH%, TARGET%, PROX%, PROX_RESTART_PA}
+ *        {THRESH_LOW, THRESH_HIGH, THRESH_TARGET, PROX_RESTART_PA}
+ *        Positive 20-bit ADC full scale (0x7FFFF = 524 287)
+ *        Earlier used to be percentages, but that makes it difficult to
+ *        set values due to integer %ages and also calculation is not
+ *        intuitively visible.
+ *
+ *        Defined for all channels as enabled channels may change.
  */
-#define NUM_THRESHOLDS_PER_CHANNEL (5)
-static const uint8_t threshold_table[NUM_THRESHOLDS_PER_CHANNEL * AGC_NUM_CHANNELS] =
+#define NUM_SETTINGS_PER_CHANNEL (4)
+static const uint32_t settings_table[NUM_SETTINGS_PER_CHANNEL * AGC_NUM_CHANNELS] =
 {
-    AGC_LOW_THRESHOLD_PCT, AGC_HIGH_THRESHOLD_PCT, AGC_TARGET_PCT, AGC_PROX_SIGNAL_PCT,       AGC_PROX_START_PA,
-    AGC_LOW_THRESHOLD_PCT, AGC_HIGH_THRESHOLD_PCT, AGC_TARGET_PCT, AGC_PROX_SIGNAL_PCT_SMALL, AGC_PROX_START_PA,
-    AGC_LOW_THRESHOLD_PCT, AGC_HIGH_THRESHOLD_PCT, AGC_TARGET_PCT, AGC_PROX_SIGNAL_PCT,       AGC_PROX_START_PA,
-    AGC_LOW_THRESHOLD_PCT, AGC_HIGH_THRESHOLD_PCT, AGC_TARGET_PCT, AGC_PROX_SIGNAL_PCT_SMALL, AGC_PROX_START_PA,
-    AGC_LOW_THRESHOLD_PCT, AGC_HIGH_THRESHOLD_PCT, AGC_TARGET_PCT, AGC_PROX_SIGNAL_PCT,       AGC_PROX_START_PA,
-    AGC_LOW_THRESHOLD_PCT, AGC_HIGH_THRESHOLD_PCT, AGC_TARGET_PCT, AGC_PROX_SIGNAL_PCT_SMALL, AGC_PROX_START_PA,
-    AGC_LOW_THRESHOLD_PCT, AGC_HIGH_THRESHOLD_PCT, AGC_TARGET_PCT, AGC_PROX_SIGNAL_PCT,       AGC_PROX_START_PA,
-    AGC_LOW_THRESHOLD_PCT, AGC_HIGH_THRESHOLD_PCT, AGC_TARGET_PCT, AGC_PROX_SIGNAL_PCT_SMALL, AGC_PROX_START_PA,
+    50000, 200000, 100000, 16, // MEAS1 (mid sensitive)
+    30000, 200000,  60000, 24, // MEAS2 (least sensitive)
+    50000, 200000, 100000,  8, // MEAS3 (most sensitive)
+    50000, 200000, 100000, 16, // MEAS4 (mid sensitive)
+    50000, 200000, 100000,  8, // MEAS5 (most sensitive)
+    30000, 200000,  60000, 24, // MEAS6 (least sensitive)
+    35000, 200000,  70000, 24, // MEAS7 (least sensitive)
+    35000, 200000,  70000, 24, // MEAS8 (AGC inactive, targets not used, PROX_RESTART_PA is needed)
 };
 
 /* =========================================================================
@@ -221,6 +236,8 @@ void set_all_channels_restart_pa (ppg_agc_t *agc, max86171_t *dev)
     for (uint8_t c = 0u; c < AGC_NUM_CHANNELS; c++)
     {
         agc_channel_t *ch = &agc->ch[c];
+        // First check if the channel is enabled
+        if (!ch->enabled) continue;
         set_pa_absolute(ch, dev, ch->AGC_PROX_RESTART_PA);
         PRINT_AGC_INFO("[AGCOFF] ch%u  PA->%u\r\n", (unsigned)c, (unsigned)ch->AGC_PROX_RESTART_PA);
     }
@@ -229,28 +246,35 @@ void set_all_channels_restart_pa (ppg_agc_t *agc, max86171_t *dev)
 /**
  * @brief Initialise the AGC struct. Currently called with PPG is started.
  */
-void ppg_agc_init(ppg_agc_t *agc)
+void ppg_agc_init(ppg_agc_t *agc, max86171_t *dev, uint16_t meas_mask)
 {
     int counter = 0;
     memset(agc, 0, sizeof(*agc));
 
+    if ((meas_mask & (1 << AGC_PROX_CH_NUM)) == 0)
+    {
+        PRINT_AGC_ERROR ("ppg_agc_init ERROR: Prox sensing channel is not enabled!\n\r");
+        return;
+    }
     // Loop for each measurement i.e. AGC channel
+    // Defined and set for all channels.
+    // Enabled channels may change during development so do not change this to continue
+    // on disabled channels else it will go out of step.
     for (uint8_t c = 0u; c < AGC_NUM_CHANNELS; c++)
     {
         agc_channel_t *ch = &agc->ch[c];
-        // All channels are enabled by default
-        ch->enabled   = true;
+        // Mark if channel's AGC is enabled
+        ch->enabled   = (meas_mask >> c) & 1u;
         /* assume contact on startup */
         ch->on_body   = true;
         /* Not in-range by default */
         ch->agc_state = 0u;
         ch->num_drv   = 0;
         /* Thresholds */
-        ch->AGC_THRESH_LOW = scale_fullscale_by_percentage(threshold_table[counter++]);
-        ch->AGC_THRESH_HIGH = scale_fullscale_by_percentage(threshold_table[counter++]);
-        ch->AGC_THRESH_TARGET = scale_fullscale_by_percentage(threshold_table[counter++]);
-        ch->AGC_THRESH_PROX = scale_fullscale_by_percentage(threshold_table[counter++]);
-        ch->AGC_PROX_RESTART_PA = threshold_table[counter++];
+        ch->AGC_THRESH_LOW = settings_table[counter++];
+        ch->AGC_THRESH_HIGH = settings_table[counter++];
+        ch->AGC_THRESH_TARGET = settings_table[counter++];
+        ch->AGC_PROX_RESTART_PA = settings_table[counter++];
 
         // Loop to find active DRVx from g_max86171_meas_config within a measurement
         // Bugfix: this loop was added so that the current values are taken from a central place
@@ -270,6 +294,8 @@ void ppg_agc_init(ppg_agc_t *agc)
                 PRINT_AGC_INIT ("AGC %d: DRVx %d (0x%02x) is active and set to %d\n\r", c, d, addr, value);
             }
         }
+        // Hack was needed to setup AGC shadow structure, undo now that it is done
+        if (c != AGC_PROX_CH_NUM) set_pa_absolute(ch, dev, AGC_PA_MIN);
     }
 }
 
@@ -281,12 +307,12 @@ void ppg_agc_init(ppg_agc_t *agc)
 bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t raw, bool ovf_error)
 {
     if (ch_idx >= AGC_NUM_CHANNELS) return false;
-    // No AGC for Meas8: it follows the on/off-body state set by the other channels.
-    // Nothing was written here, so report false.
-    if (ch_idx == (AGC_NUM_CHANNELS - 1)) return false;
 
     agc_channel_t *ch = &agc->ch[ch_idx];
     const bool is_prox_ch = (ch_idx == AGC_PROX_CH_NUM);
+
+    // First check if the channel is enabled
+    if (!ch->enabled) return false;
 
     /* Non-proximity channels simply follow the proximity channel: while
      * off-body their LEDs are off, the samples are meaningless, and they are
@@ -294,63 +320,32 @@ bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t
     if (!is_prox_ch && !ch->on_body) return false;
 
     /* Cooldown is counted per sample. Capture the state at the START of this
-     * sample so a window completing on the last cooldown sample is still skipped
-     * (same behaviour as counting whole windows). */
+     * sample so a window completing on the last cooldown sample is skipped */
     const bool in_cooldown = (ch->cooldown_remain > 0u);
     if (in_cooldown) ch->cooldown_remain--;
 
-    // Handle OVF error cases specially by lowering target window and resetting channel current
-    // NOTE: Right now due to low thresholds they don't actually get changed by this logic
+    // NOTE: Right now OVF error is not handled.
+    // In the future it will be used to reduce the target ranges and currents
+    // but the initial objective is to set them so that there is no OVF.
     if (ovf_error)
     {
-        bool written = false;
-        // Lower target range thresholds by 10% each, keep proximity threshold same
-        uint8_t temp1 = threshold_table[NUM_THRESHOLDS_PER_CHANNEL * ch_idx];
-        if (temp1 > AGC_LOW_THRESHOLD_PCT_MIN)
-        {
-            temp1 -= AGC_OVF_ADJUST_PCT;
-            // Maintain relative offsets for other thresholds
-            uint8_t temp2 = temp1 + (AGC_HIGH_THRESHOLD_PCT - AGC_LOW_THRESHOLD_PCT);
-            uint8_t temp3 = temp1 + (AGC_TARGET_PCT - AGC_LOW_THRESHOLD_PCT);
-            PRINT_AGC_INFO("[OVF]  ch%d  low=%d  high=%d  target=%d\n\r", ch_idx, temp1, temp2, temp3);
-            // And also update the runtime versions of the same
-            ch->AGC_THRESH_LOW = scale_fullscale_by_percentage(temp1);
-            ch->AGC_THRESH_HIGH = scale_fullscale_by_percentage(temp2);
-            ch->AGC_THRESH_TARGET = scale_fullscale_by_percentage(temp3);
-            reset_window_and_state(ch);
-            ch->on_body = true;
-            ch->prox_low_cnt = 0;
-            ch->prox_high_cnt = 0;
-            // Reduce the current for next time
-            written = apply_pa_delta(ch, dev, -(int16_t)AGC_MAX_FAST_PA_STEP);
-            // If current was changed then wait for AGC cooldown
-            if (written)
-                ch->cooldown_remain = AGC_COOLDOWN_SAMPLES;
-        }
-        return written;
+        PRINT_AGC_INFO("[OVF]  ch%d  low=%ld  high=%ld  target=%ld\n\r", ch_idx, ch->AGC_THRESH_LOW, ch->AGC_THRESH_HIGH, ch->AGC_THRESH_TARGET);
+        return false;
     }
 
     /* ── Accumulate sample ──────────────────────────────────────────────── */
     ch->window_sum += (int64_t)raw;
     ch->window_cnt++;
 
-    // proximity channel: always 10-sample windows, so that detecting on-body -> off-body will not get slowed down
-    // other channels: 10 samples while converging, 100 samples when in range
-    // A motion blip or brief pressure change can push a 10-sample average out of band. That triggers a PA step computed
-    // from an unrepresentative avg, which then has to be undone. A 100-sample window dilutes the blip, and if the channel
-    // does leave the band, the correction is based on a more representative level.
-    uint16_t agc_window_samples = AGC_WINDOW_SAMPLES;
-    if (!is_prox_ch && ch->agc_state == 1) agc_window_samples = AGC_WINDOW_SAMPLES_IN_RANGE;
-
     /* Wait for a full window */
-    if (ch->window_cnt < agc_window_samples) return false;
+    if (ch->window_cnt < AGC_WINDOW_SAMPLES) return false;
 
     /* ── Window complete: compute average and reset accumulator ─────────── */
-    int32_t avg = (int32_t)(ch->window_sum / (int64_t)agc_window_samples);
+    int32_t avg = (int32_t)(ch->window_sum / (int64_t)AGC_WINDOW_SAMPLES);
     ch->last_avg   = avg;
     ch->window_sum = 0;
     ch->window_cnt = 0u;
-    PRINT_AGC_IGNORE("[UPD] ch%u  avg=%ld\r\n", (unsigned)ch_idx, (long)avg);
+    PRINT_AGC_INFO("[UPD] ch%u  avg=%ld\r\n", (unsigned)ch_idx, (long)avg);
 
     /* =====================================================================
      * PROXIMITY CHECK  (proximity channel only; runs regardless of AGC enable)
@@ -358,7 +353,7 @@ bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t
 
     if (is_prox_ch)
     {
-        if (avg < ch->AGC_THRESH_PROX) {
+        if (avg < scale_fullscale_by_percentage(AGC_PROX_SIGNAL_PCT)) {
             /* Signal is very low — possible off-body */
             if (ch->prox_low_cnt < AGC_PROX_CONFIRM_WINDOWS) ch->prox_low_cnt++;
             ch->prox_high_cnt = 0u;
@@ -385,21 +380,28 @@ bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t
     }
 
     /* =====================================================================
-     * AGC STEP  (only when on skin, AGC enabled and cooldown elapsed)
+     * AGC STEP  (only when on skin and cooldown elapsed)
      * ===================================================================== */
-    if (!ch->on_body || !ch->enabled) return false;
+    if (!ch->on_body) return false;
 
     /* Windows finishing inside the cooldown may still contain samples from the
-     * previous current: skip them entirely (do not update zone/window length). */
+     * previous current: skip them entirely */
     if (in_cooldown) return false;
+
+    /* Freeze the AGC while the proximity channel is below its skin
+     * threshold. On the prox channel, prox_low_cnt > 0 means the latest window
+     * was below AGC_PROX_SIGNAL_PCT (the else branch above resets it to 0).
+     * This could be finger removal, so do not chase the falling signal by
+     * raising current. Either the next windows confirm OFF-BODY, or the signal
+     * recovers (prox_low_cnt = 0) and the AGC resumes normally.
+     * Gating on the PROX channel (not on this channel's own avg) is deliberate:
+     * a non-prox channel can legitimately read "too dim" (e.g. right after init,
+     * where it is parked at AGC_PA_MIN, or after restart), so its own avg cannot
+     * tell finger removal from normal ramp-up. */
+    if (agc->ch[AGC_PROX_CH_NUM].prox_low_cnt > 0u) return false;
 
     /* Determine signal zone */
     uint8_t zone;
-    // TODO: Consider marking below ch->AGC_THRESH_PROX also as zone=1
-    // so as to not raise current when finger is taken off. But could
-    // it have happened not because finger is removed but because AGC took
-    // the current too low or contact is weak?
-    // if      (avg < ch->AGC_THRESH_LOW && avg > ch->AGC_THRESH_PROX)  zone = 0u;   /* too dim  → raise PA */
     if      (avg < ch->AGC_THRESH_LOW)  zone = 0u;   /* too dim  → raise PA */
     else if (avg > ch->AGC_THRESH_HIGH) zone = 2u;   /* too bright → lower PA */
     else                                zone = 1u;   /* in target band         */
@@ -410,7 +412,7 @@ bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t
     }
     ch->agc_state = zone;
 
-    /* In range: nothing to do (next window will be the long one) */
+    /* In range: nothing to do */
     if (zone == 1u) return false;
 
     /*
@@ -422,7 +424,7 @@ bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t
      * applied to all drivers, which assumes they track each other.
      *
      * The LED/PPG relationship is not perfectly linear, so the correction
-     * is capped to avoid a large jump from an abnormal window.
+     * is capped to avoid a large jump.
      */
     int16_t delta = 0;
      /* Target point used for estimating the PA correction */
@@ -456,9 +458,7 @@ bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t
 
     if (adjusted) {
         // Skip cooldown samples so that old samples are discarded.
-        // Window variables have already been reset and agc_state
-        // is already not 1, so windowing will go back to the
-        // shorter window for a faster response.
+        // Window variables have already been reset.
         ch->cooldown_remain = AGC_COOLDOWN_SAMPLES;
         ch->adj_count++;
 
@@ -469,22 +469,6 @@ bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t
     }
 
     return adjusted;
-}
-
-/**
- * @brief Use a majority decision across channels to decide if the device
- *        is off the body or on.
- *        Call from app.c if needed to send this status over BLE along with the data
- *        Note: channels now mirror the proximity channel, so this vote is
- *        effectively the proximity channel's state.
- */
-bool ppg_agc_is_off_body(const ppg_agc_t *agc)
-{
-    uint8_t off_count = 0u;
-    for (uint8_t c = 0u; c < AGC_NUM_CHANNELS - 1; c++) {
-        if (!agc->ch[c].on_body) off_count++;
-    }
-    return (off_count >= AGC_OFFBODY_MIN_CH);
 }
 
 /* End of file */

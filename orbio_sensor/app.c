@@ -43,7 +43,7 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (29)
+#define VERSION (30)
 
 // Types of prints
 #define PRINT_INIT printf
@@ -1118,6 +1118,7 @@ static uint8_t fifo_buf[MAX_FIFO_SAMPLES * 3];
 static uint16_t samplecount;
 static bool tag1found;
 static uint8_t predicted_tag;
+static uint16_t agc_meas_mask;
 static ppg_agc_t g_agc;
 static void dostopppg (void);
 
@@ -1138,6 +1139,7 @@ static void start_ppg (void)
     // Write the base config registers
     // Write the registers for each MEASn enabled
     // Write SYS_CFG2 and SYS_CFG1
+    // Enable all measurements
     ret = max86171_load_config_from_table(&max86171_dev, MAX86171_MEAS_ALL);
     if (ret)
     {
@@ -1158,7 +1160,9 @@ static void start_ppg (void)
     predicted_tag = 0;
 
     // Set up the AGC, note that this init is also needed if AGC is off
-    ppg_agc_init(&g_agc);
+    // Let AGC only run on required channels
+    agc_meas_mask = MAX86171_MEAS1_EN | MAX86171_MEAS3_EN | MAX86171_MEAS5_EN;
+    ppg_agc_init(&g_agc, &max86171_dev, agc_meas_mask);
 
     // If AGC is off, set all channels to a fixed current which will not be adjusted by AGC
     if (ppg_agc_on == false)
@@ -1358,6 +1362,8 @@ static void parse_ppg_fifo (void)
             // Feed samples to the AGC algorithm for each PPG1/PPG2 pair
             ppg_agc_feed(&g_agc, &max86171_dev, tag - 1u, avg, ovf_error);
         }
+        // Don't store/send samples whose AGC is not enabled
+        if ((agc_meas_mask & (1 << (tag - 1))) == 0) continue;
 
         // Shouldn't happen due to limiting of samplecount, but add anyway
         // for local safety.

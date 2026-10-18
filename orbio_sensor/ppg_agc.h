@@ -1,19 +1,19 @@
 /**
  * @file ppg_agc.h
  * @brief Automatic Gain Control (AGC) + Proximity (on-body) Detection
- *        for MAX86171 PPG channels
+ *        for MAX86171 PPG channels. Does not run for disable channels.
  *
  * =========================================================================
  * AGC ALGORITHM
  * =========================================================================
- * Each of the active measurement channels (MEAS1-MEAS7) runs an
+ * Each of the active measurement channels (MEAS1-MEAS8) runs an
  * independent loop:
  *
  *   1. Accumulate the DC average over AGC_WINDOW_SAMPLES samples.
  *   2. Compare the average against two thresholds (% of 20-bit ADC full scale):
  *
- *        avg < AGC_LOW_THRESHOLD_PCT         → increase PA
- *        avg > AGC_HIGH_THRESHOLD_PCT        → decrease PA
+ *        avg < low threshold                 → increase PA
+ *        avg > high threshold                → decrease PA
  *        Else                                → in target band, no change
  *
  *   3. A cooldown of AGC_COOLDOWN_WINDOWS windows is enforced between
@@ -31,18 +31,15 @@
  *
  *   Signal below AGC_PROX_SIGNAL_PCT for AGC_PROX_CONFIRM_WINDOWS
  *   consecutive windows  →  declare OFF-BODY:
- *       • PA is reduced to AGC_PROX_IDLE_PA on all drivers
+ *       • PA is reduced to AGC_PROX_SEARCHLIGHT_PA
  *       • Normal AGC adjustments are suspended for this channel
  *       • ch.on_body = false
  *
  *   Recovery: signal must exceed AGC_PROX_SIGNAL_PCT for
  *   AGC_PROX_RECOVER_WINDOWS consecutive windows  →  declare ON-BODY:
- *       • PA is restored to AGC_PROX_RESTART_PA (mid-range starting point)
+ *       • PA is restored to AGC_PROX_RESTART_PA
  *       • AGC resumes from that value
  *       • ch.on_body = true
- *
- * Global helper ppg_agc_is_off_body() returns true when a configurable
- * minimum number of channels (AGC_OFFBODY_MIN_CH) report off-body.
  *
  * HARDWARE MAPPING is taken from g_max86171_meas_config in max86171.h
  */
@@ -64,18 +61,7 @@ extern "C" {
  * ========================================================================= */
 
 /** Number of samples that form one evaluation window. */
-#define AGC_WINDOW_SAMPLES          10u   /* Faster when not in range */
-#define AGC_WINDOW_SAMPLES_IN_RANGE 100u  /* Slower when in range */
-
-/**
- * Target band as a percentage of the positive 20-bit ADC full scale
- * (0x7FFFF = 524 287).  AGC keeps the DC average inside [LOW, HIGH].
- */
-#define AGC_LOW_THRESHOLD_PCT      10u   /* below -> raise LED   */
-#define AGC_HIGH_THRESHOLD_PCT     40u   /* above -> lower LED   */
-#define AGC_TARGET_PCT             20u   /* just right -> stay put */
-#define AGC_LOW_THRESHOLD_PCT_MIN  10u   /* don't go below this */
-#define AGC_OVF_ADJUST_PCT         10u   /* step to reduce targets in case of OVF errors */
+#define AGC_WINDOW_SAMPLES          10u
 
 /**
  * Cooldown in windows between successive PA adjustments.
@@ -124,12 +110,9 @@ extern "C" {
  *
  * Skin contact with any reasonable LED current returns hundreds of thousands
  * of counts.  Air returns near zero even at maximum LED current.
- * 5% = ~26,214 counts is conservative enough to survive motion artefacts.
- *
  * Don't keep it so low that even without proximity it's detected as on-body
  */
-#define AGC_PROX_SIGNAL_PCT        5u  // For the stronger PD combo
-#define AGC_PROX_SIGNAL_PCT_SMALL  2u  // For the weaker PD combo
+#define AGC_PROX_SIGNAL_PCT        2u  // For the stronger PD combo
 
 /**
  * Consecutive windows the signal must stay BELOW AGC_PROX_SIGNAL_PCT
@@ -151,7 +134,7 @@ extern "C" {
  * LSB is 0.12 mA in 31 mA and 0.48 mA in 124 mA range.
  * Bugfix: There will not be any "search light" if the setting is 0 as originally.
  */
-#define AGC_PROX_IDLE_PA           3u
+#define AGC_PROX_SEARCHLIGHT_PA    3u
 #define AGC_OFFBODY_PA_NONPROX     AGC_PA_MIN
 
 /**
@@ -159,21 +142,6 @@ extern "C" {
  * Kept as non-zero to get around the ppg_init logic for now.
  */
 #define AGC_PA_TABLE_INIT          1u
-
-/**
- * PA to restore when skin contact is detected again.
- * Mid-range starting point lets AGC converge without large overshoot.
- */
-#define AGC_PROX_START_PA          8u
-
-/**
- * Minimum number of channels that must report off-body before
- * ppg_agc_is_off_body() returns true.
- * Majority vote prevents a single noisy channel from
- * triggering a false removal event.
- */
-#define AGC_OFFBODY_MIN_CH         5u
-
 
 /* =========================================================================
  * Derived constants (do not edit)
@@ -198,7 +166,6 @@ typedef struct {
     int32_t  AGC_THRESH_LOW;    /**< Target band lower range.               */
     int32_t  AGC_THRESH_HIGH;   /**< Target band upper range.               */
     int32_t  AGC_THRESH_TARGET; /**< Target.                                */
-    int32_t  AGC_THRESH_PROX;   /**< Proximity threshold.                   */
     int32_t  AGC_PROX_RESTART_PA;   /**< Proximity start current.           */
 
     /* ── Sample accumulator ─────────────────────────────────────────────── */
@@ -221,7 +188,7 @@ typedef struct {
     int32_t last_avg;           /**< Average from the most recent window.   */
     uint8_t agc_state;          /**< 0 = low, 1 = in-range, 2 = high.      */
     uint8_t adj_count;          /**< Total PA adjustments since init.       */
-    bool    enabled;            /**< false = freeze PA, skip AGC (not prox).*/
+    bool    enabled;            /**< false = skip AGC                       */
 } agc_channel_t;
 
 /** Top-level AGC context — one instance per device. */
@@ -247,7 +214,7 @@ void set_all_channels_restart_pa (ppg_agc_t *agc, max86171_t *dev);
  *
  * @param  agc  Pointer to the context to initialise.
  */
-void ppg_agc_init(ppg_agc_t *agc);
+void ppg_agc_init(ppg_agc_t *agc, max86171_t *dev, uint16_t meas_mask);
 
 /**
  * @brief  Feed one raw PPG sample into the AGC + proximity engine.

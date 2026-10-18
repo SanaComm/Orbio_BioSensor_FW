@@ -17,7 +17,7 @@ void cli_stop_sweep(sl_cli_command_arg_t *arguments);
 void cli_set_sweep_timing(sl_cli_command_arg_t *arguments);
 void cli_set_freq(sl_cli_command_arg_t *arguments);
 void cli_cal_offsets(sl_cli_command_arg_t *arguments);
-void cli_print_iq(sl_cli_command_arg_t *arguments);
+void cli_print_samples(sl_cli_command_arg_t *arguments);
 void cli_print_unit_id(sl_cli_command_arg_t *arguments);
 void cli_print_fw_ver(sl_cli_command_arg_t *arguments);
 
@@ -133,8 +133,8 @@ static const sl_cli_command_info_t cmd_cal_offsets =
                         SL_CLI_ARG_END,
                     });
 
-static const sl_cli_command_info_t cmd_print_iq =
-    SL_CLI_COMMAND(cli_print_iq, "Print IQ samples (default 0)\r",
+static const sl_cli_command_info_t cmd_print_samples =
+    SL_CLI_COMMAND(cli_print_samples, "Print samples (default 0)\r",
                     "onoff 1:on 0:off\r" SL_CLI_UNIT_SEPARATOR,
                     {
                         SL_CLI_ARG_UINT8,
@@ -173,7 +173,7 @@ static sl_cli_command_entry_t custom_cmd_table[] =
     {"stop_sweep", &cmd_stop_sweep, false},
     {"set_freq", &cmd_set_freq, false},
     {"cal_offsets", &cmd_cal_offsets, false},
-    {"print_iq", &cmd_print_iq, false},
+    {"print_samples", &cmd_print_samples, false},
     {"print_unit_id", &cmd_print_unit_id, false},
     {"print_fw_ver", &cmd_print_fw_ver, false},
     {NULL, NULL, false},

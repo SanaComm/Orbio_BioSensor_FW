@@ -407,7 +407,9 @@ static int freeLDMADRV (void)
 // Buffer to store IADC samples
 #define DUMMY_SAMPLES (5)
 uint32_t scanBuffer[NUM_INPUTS * (NUM_SAMPLES_PER_FREQ + DUMMY_SAMPLES)];
+#ifdef USE_ATOMIC
 void exit_atomic (void);
+#endif
 
 void doIADC (void)
 {
@@ -419,7 +421,9 @@ void doIADC (void)
     IADC_command(IADC0, iadcCmdEnableTimer);
 #endif
     IADC_command(IADC0, iadcCmdStartScan);
-    //exit_atomic ();
+#ifdef USE_ATOMIC
+    exit_atomic ();
+#endif
     while (conversiondone == false);
 #ifdef USE_ADC_TIMER
     // Disable the IADC timer once a scan is done

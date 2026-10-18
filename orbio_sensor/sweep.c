@@ -40,6 +40,7 @@ void initStoreSweep (void)
 static int patternindex;
 #endif
 
+#ifdef USE_ATOMIC
 // To keep the LED timer from firing during PLL+IADC operation
 // which we need to be as identical in time as possible
 static CORE_irqState_t myIRQState;
@@ -52,6 +53,7 @@ void exit_atomic (void)
 {
     CORE_ExitAtomic(myIRQState);
 }
+#endif
 
 static void waitForPLLLock (void)
 {
@@ -80,7 +82,7 @@ void doOneSweep (int sweepcount)
     SPIDRV_SetBitrate (sl_spidrv_inst0_handle, CMU_ClockFreqGet (cmuClock_PCLK) / 2);
     for (int i = START_FREQ_KHZ; i < END_FREQ_KHZ; i += FREQ_STEP_KHZ)
     {
-        if (iq_print_enabled == false) { PRINT_SWEEP_INFO ("."); }
+        if (samples_print_enabled == false) { PRINT_SWEEP_INFO ("."); }
 #ifdef MEASURE_TIMING
         uint32_t time1 = sl_sleeptimer_get_tick_count();
 #endif
@@ -95,7 +97,9 @@ void doOneSweep (int sweepcount)
         uint32_t time2 = sl_sleeptimer_get_tick_count();
 #endif
 
-        //enter_atomic ();
+#ifdef USE_ATOMIC
+        enter_atomic ();
+#endif
         waitForPLLLock ();
 
 #ifdef MEASURE_TIMING
@@ -140,7 +144,7 @@ void doOneSweep (int sweepcount)
         }
 #endif
 
-        if (iq_print_enabled == false)
+        if (samples_print_enabled == false)
         {
             int c = sli_cli_io_getchar ();
             if ((c != EOF) && ((char)c != '\0'))
@@ -182,7 +186,7 @@ void doOneSweep (int sweepcount)
     PRINT_SWEEP_INFO ("Ticks in one sweep = %ld\n\r", time6 - time0);
 #endif
 
-    if (iq_print_enabled == true)
+    if (samples_print_enabled == true)
     {
         for (int i = 0; i < RESULT_SIZE; i++)
         {

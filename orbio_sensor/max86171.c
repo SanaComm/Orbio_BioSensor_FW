@@ -251,19 +251,19 @@ int max86171_status_read_clear(max86171_t *dev) {
     }
     if (MAX86171_F_GET(MAX86171_STATUS1_ALC_OVF, s1) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear: ALC_OVF = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear: ALC_OVF = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS1_EXP_OVF, s1) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear: EXP_OVF = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear: EXP_OVF = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS2_VDD_OOR, s2) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: VDD_OOR = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: VDD_OOR = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS2_INVALID_CFG, s2) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: INVALID_CFG = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: INVALID_CFG = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS2_LED9_COMPB, s2) != 0)
     {

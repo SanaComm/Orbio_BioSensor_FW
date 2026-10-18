@@ -44,14 +44,13 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (19)
+#define VERSION (20)
 
 // Types of prints
 #define PRINT_INIT printf
 #define PRINT_INFO printf
 #define PRINT_DEBUG printf
 #define PRINT_ERROR printf
-#define PRINT_SAMPLES printf
 #define PRINT_IGNORE(...)
 
 /**************************************************************************************************
@@ -82,8 +81,6 @@ static const char *getModuleName(app_module_t module)
 
 // TODO: What if a module is stopped from CLI or BLE, and there is a timer/interrupt that just triggers
 // TODO: Current handleNewPacket does not work if two or more packet types have to be interspersed
-// TODO: There is no check that handleNewPacket is not called before all chunks of previous packet
-// were sent out, which could result in resultArraySend getting overwritten.
 // TODO: VBAT_ADC periodic read and battery status check
 
 /**************************************************************************************************
@@ -105,7 +102,7 @@ uint8_t trigfreq;
 uint8_t pll_gain;
 uint8_t sync_mode;
 uint32_t frequency_to_set_khz;
-bool iq_print_enabled;
+bool samples_print_enabled;
 bool run_cal_offsets;
 uint8_t lnagain, vgagain;
 #define SWEEP_INTERVAL_DEFAULT_SEC (1 * 60)
@@ -131,6 +128,7 @@ typedef enum
 {
     SWEEP_STATE_INIT = 1,
     SWEEP_STATE_SWEEP,
+    SWEEP_STATE_PENDING,
     SWEEP_STATE_SETFREQ,
     SWEEP_STATE_END,
     SWEEP_STATE_NONE,
@@ -460,7 +458,7 @@ sl_power_manager_on_isr_exit_t app_sleep_on_isr_exit(void)
 static uint64_t time_now = 0;
 #endif
 
-#define MAX_RETRY_COUNT (20)
+#define MAX_RETRY_COUNT (40)
 #define RETRY_BACKOFF_TIME_MSEC (5)
 static int sendchunkretrycount;
 static uint32_t errtime;
@@ -567,42 +565,55 @@ static uint8_t resultArraySend[HEADER_SIZE + sizeof(int16_t) * RESULT_SIZE * NUM
 
 // Call this when a new packet is ready to send e.g. when one sweep of data is
 // collected, or PPG has collected one frame of measurements.
-// Note: resultArraySend, bytesRemaining etc. will get overwritten if the contents
-// of the previous call were not sent out yet. This is known and considered desirable
-// as we have no way of buffering up older unsent data indefinitely.
 static bool handleNewPacket (app_module_t source, uint8_t *dataSource, int dataSourceLen)
 {
-    // True if packet was fully sent or connection not opened
-    // False if packet partially sent or send failure which needs retry
+    // True if packet was fully sent or connection not opened or previous data not fully sent
+    // False if packet partially sent or send failure which needs retry i.e. send is ongoing
+    // TODO: The bool return value is overloaded and bytesRemaining is used to distinguish
+    // some cases
     bool ret = true;
     if (!dataSource || (dataSourceLen > ((int)sizeof(resultArraySend) - HEADER_SIZE)))
     {
         PRINT_ERROR ("ERROR: handleNewPacket source address %p or source length %d\n\r", dataSource, dataSourceLen);
+        bytesRemaining = 0;
     }
     // Send data if transfer is enabled
     else if ((transferEnabled == true) && (sendNotification == true))
     {
-        // At the start of a sweep send a syncword, packet type and timestamp
-        resultArraySend[0] = 0xAA;
-        resultArraySend[1] = 0xBB;
-        resultArraySend[2] = 0xCC;
-        // Insert packet type
-        resultArraySend[3] = __builtin_ctz(source);
-        // Insert timestamp
-        uint32_t nowtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
-        for (size_t k = 0; k < sizeof(uint32_t); k++)
-            resultArraySend[4 + k] = (nowtime >> (24 - k * 8)) & 0xFF;
-        // Insert packet byte count (not including fixed header size)
-        resultArraySend[8] = (dataSourceLen >> 8) & 0xFF;
-        resultArraySend[9] = dataSourceLen & 0xFF;
-        // As dataSource will come into use when adding a new packet, make a local copy for TX
-        memcpy (resultArraySend + HEADER_SIZE, dataSource, dataSourceLen);
-        sendData = resultArraySend;
-        sendTotalDataLen = HEADER_SIZE + dataSourceLen;
-        bytesRemaining = sendTotalDataLen;
-        sendchunkretrycount = 0;
-        errtime = 0;
-        ret = sendChunk ();
+        if (bytesRemaining == 0)
+        {
+            // At the start of a sweep send a syncword, packet type and timestamp
+            resultArraySend[0] = 0xAA;
+            resultArraySend[1] = 0xBB;
+            resultArraySend[2] = 0xCC;
+            // Insert packet type
+            resultArraySend[3] = __builtin_ctz(source);
+            // Insert timestamp
+            uint32_t nowtime = sl_sleeptimer_tick_to_ms (sl_sleeptimer_get_tick_count());
+            for (size_t k = 0; k < sizeof(uint32_t); k++)
+                resultArraySend[4 + k] = (nowtime >> (24 - k * 8)) & 0xFF;
+            // Insert packet byte count (not including fixed header size)
+            resultArraySend[8] = (dataSourceLen >> 8) & 0xFF;
+            resultArraySend[9] = dataSourceLen & 0xFF;
+            // As dataSource will come into use when adding a new packet, make a local copy for TX
+            memcpy (resultArraySend + HEADER_SIZE, dataSource, dataSourceLen);
+            sendData = resultArraySend;
+            sendTotalDataLen = HEADER_SIZE + dataSourceLen;
+            bytesRemaining = sendTotalDataLen;
+            sendchunkretrycount = 0;
+            errtime = 0;
+            ret = sendChunk ();
+        }
+        else
+        {
+            // Should not form the new data in resultArraySend, instead wait till the previous
+            // data is fully sent.
+        }
+    }
+    else
+    {
+        // Can't send so reset
+        bytesRemaining = 0;
     }
     return ret;
 }
@@ -999,7 +1010,10 @@ static void parse_ppg_fifo (void)
         // Skip the last (ambient) measurement
         else if (tag == MAX86171_NUM_MEAS)
         {
-            PRINT_SAMPLES ("\n\r");
+            if (samples_print_enabled == true)
+            {
+                PRINT_INFO ("\n\r");
+            }
             continue;
         }
         // MAX86171 datasheet says to ignore samples till tag = 1 after a restart.
@@ -1023,7 +1037,10 @@ static void parse_ppg_fifo (void)
             avg = pd2;
         else
             avg = temp;
-        PRINT_SAMPLES ("%ld,", avg);
+        if (samples_print_enabled == true)
+        {
+            PRINT_INFO ("%ld,", avg);
+        }
 
         if (ppg_agc_on == true)
         {
@@ -1251,34 +1268,63 @@ static void run_sweep_statemachine (void)
                 PRINT_INFO ("Break from sweep\n\r");
                 sweepState = SWEEP_STATE_END;
                 // Finish up sweep
-                if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
-                {
-                    PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal END\n\r");
-                }
+                triggerSweep ();
                 break;
             }
 #ifdef USE_BLE
             bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sizeof(resultArray));
             // Trigger next sweep as data was fully sent in a single packet, or connection is not open
-            if (ret == true)
+            if (ret == true && bytesRemaining == 0)
+            {
+                // Continue sweep
                 triggerSweep ();
+            }
+            // Previous bytes not sent yet so wait in a new state
+            else if (ret == true && bytesRemaining != 0)
+            {
+                sweepState = SWEEP_STATE_PENDING;
+                // Trigger to check if all bytes sent
+                triggerSweep ();
+            }
+            else
+            {
+                // Do nothing as the sweep will be triggered once the last chunk is sent
+            }
 #else
             // Continue sweep
-            if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
-            {
-                PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal SWEEP\n\r");
-            }
+            triggerSweep ();
 #endif
         }
         else
         {
             sweepState = SWEEP_STATE_END;
             // Finish up sweep
-            if (sl_bt_external_signal (SIGNAL_SWEEP) != SL_STATUS_OK)
-            {
-                PRINT_ERROR ("ERROR: Could not trigger sl_bt_external_signal END\n\r");
-            }
+            triggerSweep ();
         }
+        }
+        break;
+
+        // This state is transitory and so the sweep time and user
+        // input checks to break from active sweep are not added here.
+        case SWEEP_STATE_PENDING:
+        {
+            bool ret = handleNewPacket (ACTIVE_MODULE_SWEEP, (uint8_t *)resultArray, sizeof(resultArray));
+            // Trigger next sweep as data was fully sent in a single packet, or connection is not open
+            if (ret == true && bytesRemaining == 0)
+            {
+                sweepState = SWEEP_STATE_SWEEP;
+                triggerSweep ();
+            }
+            // Previous bytes not sent yet so wait in this state
+            else if (ret == true && bytesRemaining != 0)
+            {
+                // Check after a while if still pending
+                triggerSweep ();
+            }
+            else
+            {
+                // Do nothing as the sweep will be triggered once the last chunk is sent
+            }
         }
         break;
 
@@ -1799,7 +1845,7 @@ SL_WEAK void app_init(void)
     pll_gain = 8;
     sync_mode = 0;
     frequency_to_set_khz = 0;
-    iq_print_enabled = false;
+    samples_print_enabled = false;
     run_cal_offsets = false;
     lnagain = 0;
     vgagain = CMX994_MAX_VGA_GAIN;
@@ -2251,22 +2297,22 @@ void cli_cal_offsets(sl_cli_command_arg_t *arguments)
     dosweep ();
 }
 
-void cli_print_iq(sl_cli_command_arg_t *arguments)
+void cli_print_samples(sl_cli_command_arg_t *arguments)
 {
     int argc = sl_cli_get_argument_count(arguments);
     if (argc != 1)
     {
-        PRINT_ERROR("print_iq: incorrect number of arguments. Expected 1!\n\r");
+        PRINT_ERROR("print_samples: incorrect number of arguments. Expected 1!\n\r");
         return;
     }
     uint8_t temp = sl_cli_get_argument_uint8(arguments, 0);
     if ((temp != 0) && (temp != 1))
     {
-        PRINT_ERROR("print_iq: incorrect argument %d\n\r", temp);
+        PRINT_ERROR("print_samples: incorrect argument %d\n\r", temp);
     }
     else
     {
-        iq_print_enabled = temp;
+        samples_print_enabled = temp;
     }
 }
 

@@ -11,6 +11,13 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v20:
+- Separated max86171 tables into a separate file as keeping them in a .h file is not a good practise
+- Enable all max86171 read status error prints
+- Renamed print_iq to print_samples to use across Sweep and PPG modes
+- Added a check for bytesRemaining of previous sweep before sending new sweep's data in handleNewPacket
+- Increased MAX_RETRY_COUNT to 40 to prevent dropping of chunks too soon
+
 ==> orbio_biosensor_v19:
 - TEMP: Disabled use of atomic from PLL setting to before IADC in case it is affecting BLE connection which is flaky
 - All active LEDs current changed from 0x01 to 0x05 for testing

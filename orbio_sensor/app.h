@@ -44,6 +44,7 @@
 #if (SL_IOSTREAM_USART_INST0_RESTRICT_ENERGY_MODE_TO_ALLOW_RECEPTION == 1)
 #define CLI_KEEP_ALIVE
 #endif
+#undef USE_ATOMIC
 
 /**************************************************************************//**
  * Application Init.
@@ -104,7 +105,7 @@ extern uint8_t pll_gain;
 extern uint8_t trigfreq;
 extern int8_t ioffset, qoffset;
 extern uint8_t sync_mode;
-extern bool iq_print_enabled;
+extern bool samples_print_enabled;
 extern bool userinput;
 extern uint32_t frequency_to_set_khz;
 extern int i_avg_mV[NUM_FREQS], q_avg_mV[NUM_FREQS];

@@ -269,7 +269,7 @@ bool ppg_agc_feed(ppg_agc_t *agc, max86171_t *dev, uint8_t ch_idx, const int32_t
 /**
  * @brief Use a majority decision across channels to decide if the device
  *        is off the body or on.
- *        TODO: Call from app.c if needed to send this status over BLE along with the data
+ *        Call from app.c if needed to send this status over BLE along with the data
  */
 bool ppg_agc_is_off_body(const ppg_agc_t *agc)
 {

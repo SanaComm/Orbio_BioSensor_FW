@@ -4,12 +4,13 @@
 void cli_set_trigfreq(sl_cli_command_arg_t *arguments);
 void cli_set_iq_offsets(sl_cli_command_arg_t *arguments);
 void cli_set_lna_vga_gain(sl_cli_command_arg_t *arguments);
-void cli_set_pll_gain(sl_cli_command_arg_t *arguments);
 void cli_start_accel(sl_cli_command_arg_t *arguments);
 void cli_stop_accel(sl_cli_command_arg_t *arguments);
 #ifdef USE_PPG
 void cli_start_ppg(sl_cli_command_arg_t *arguments);
 void cli_stop_ppg(sl_cli_command_arg_t *arguments);
+void cli_set_ppg_agc(sl_cli_command_arg_t *arguments);
+void cli_set_ppg_meas(sl_cli_command_arg_t *arguments);
 #endif
 void cli_dosweep(sl_cli_command_arg_t *arguments);
 void cli_stop_sweep(sl_cli_command_arg_t *arguments);
@@ -46,14 +47,6 @@ static const sl_cli_command_info_t cmd_set_lna_vga_gain =
                         SL_CLI_ARG_END,
                     });
 
-static const sl_cli_command_info_t cmd_set_pll_gain =
-    SL_CLI_COMMAND(cli_set_pll_gain, "Set PLL gain in 1 dB steps (default 8)\r",
-                    "gain 0 to 18\r" SL_CLI_UNIT_SEPARATOR,
-                    {
-                        SL_CLI_ARG_UINT8,
-                        SL_CLI_ARG_END,
-                    });
-
 static const sl_cli_command_info_t cmd_start_accel =
     SL_CLI_COMMAND(cli_start_accel, "Start periodic Accel read)\r",
                     "" SL_CLI_UNIT_SEPARATOR,
@@ -80,6 +73,24 @@ static const sl_cli_command_info_t cmd_stop_ppg =
     SL_CLI_COMMAND(cli_stop_ppg, "Stop PPG\r",
                     "" SL_CLI_UNIT_SEPARATOR,
                     {
+                        SL_CLI_ARG_END,
+                    });
+
+static const sl_cli_command_info_t cmd_set_ppg_agc =
+    SL_CLI_COMMAND(cli_set_ppg_agc, "Set PPG AGC (default 1)\r",
+                    "Set PPG AGC to On (1) or Off (0)\r" SL_CLI_UNIT_SEPARATOR,
+                    {
+                        SL_CLI_ARG_UINT8,
+                        SL_CLI_ARG_END,
+                    });
+
+static const sl_cli_command_info_t cmd_set_ppg_meas =
+    SL_CLI_COMMAND(cli_set_ppg_meas, "Set PPG Measurement parameters\r",
+                    "Choose PPG measurement (1 to 8)\r" SL_CLI_UNIT_SEPARATOR "Set average (1 (PPG1), 2 (PPG2), 3 (default both))\r" SL_CLI_UNIT_SEPARATOR "Set current for DRVA/DRVB/DRVC (0 (no change) to 255 (32 mA)) in steps of 0.1255 mA\r" SL_CLI_UNIT_SEPARATOR,
+                    {
+                        SL_CLI_ARG_UINT8,
+                        SL_CLI_ARG_UINT8,
+                        SL_CLI_ARG_UINT8,
                         SL_CLI_ARG_END,
                     });
 #endif
@@ -149,12 +160,13 @@ static sl_cli_command_entry_t custom_cmd_table[] =
     {"set_trigfreq", &cmd_set_trigfreq, false},
     {"set_iq_offsets", &cmd_set_iq_offsets, false},
     {"set_lna_vga_gain", &cmd_set_lna_vga_gain, false},
-    {"set_pll_gain", &cmd_set_pll_gain, false},
     {"start_accel", &cmd_start_accel, false},
     {"stop_accel", &cmd_stop_accel, false},
 #ifdef USE_PPG
     {"start_ppg", &cmd_start_ppg, false},
     {"stop_ppg", &cmd_stop_ppg, false},
+    {"set_ppg_agc", &cmd_set_ppg_agc, false},
+    {"set_ppg_meas", &cmd_set_ppg_meas, false},
 #endif
     {"set_sweep_timing", &cmd_set_sweep_timing, false},
     {"dosweep", &cmd_dosweep, false},

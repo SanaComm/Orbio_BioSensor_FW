@@ -11,6 +11,14 @@
 
 Description of most recent firmware version changes:
 
+==> orbio_biosensor_v19:
+- TEMP: Disabled use of atomic from PLL setting to before IADC in case it is affecting BLE connection which is flaky
+- All active LEDs current changed from 0x01 to 0x05 for testing
+- Added function max86171_set_config_current
+- Removed command set_pll_gain, added commands set_ppg_agc, set_ppg_meas
+- BUGFIX: fixed wraparound using '<' key from 700 MHz to 1080 MHz when in set_freq mode
+- Added return value error handling for MAX86171 function calls in PPG startup
+
 ==> orbio_biosensor_v18:
 - Added commands set_lna_vga_gain, cal_offsets
 - Changed set_iq_offsets to take a bitfield and calculate step size based on VGA gain

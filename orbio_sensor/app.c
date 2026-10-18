@@ -44,13 +44,15 @@
 #include "sl_cli_handles.h"
 #include "math.h"
 
-#define VERSION (18)
+#define VERSION (19)
 
 // Types of prints
 #define PRINT_INIT printf
 #define PRINT_INFO printf
 #define PRINT_DEBUG printf
 #define PRINT_ERROR printf
+#define PRINT_SAMPLES printf
+#define PRINT_IGNORE(...)
 
 /**************************************************************************************************
     Active module Defines and Variables.
@@ -791,7 +793,7 @@ static void setup_interrupts (void)
  * PPG functions
  *****************************************************************************/
 
-static bool ppg_init_done;
+static bool ppg_init_done, ppg_agc_on;
 static uint8_t fifo_buf[MAX_FIFO_SAMPLES * 3];
 static uint16_t samplecount;
 static bool tag1found;
@@ -807,17 +809,29 @@ static void start_ppg (void)
     enable_SPI_pins ();
     // Soft reset
     ret = max86171_soft_reset(&max86171_dev);
-    PRINT_INIT ("max86171_soft_reset returned %d\n\r", ret);
+    if (ret)
+    {
+        PRINT_ERROR ("ERROR: max86171_soft_reset failed at startup\n\r");
+        dostopppg ();
+        return;
+    }
     // Write the base config registers
     // Write the registers for each MEASn enabled
     // Write SYS_CFG2 and SYS_CFG1
     ret = max86171_load_config_from_table(&max86171_dev, MAX86171_MEAS_ALL);
-    PRINT_INIT ("max86171_load_config_from_table returned %d\n\r", ret);
+    if (ret)
+    {
+        PRINT_ERROR ("ERROR: max86171_load_config_from_table failed at startup\n\r");
+        dostopppg ();
+        return;
+    }
     // Clear the FIFO to start afresh
     ret = max86171_fifo_flush(&max86171_dev);
     if (ret)
     {
-        PRINT_ERROR ("ERROR: max86171 FIFO flush failed at startup\n\r");
+        PRINT_ERROR ("ERROR: max86171_fifo_flush failed at startup\n\r");
+        dostopppg ();
+        return;
     }
     // Last tag is unknown to begin with
     tag1found = false;
@@ -917,7 +931,7 @@ static bool read_ppg_fifo (void)
     // max86171_fifo_read_samples had the correct method
     // entry was created after interrupt was triggered
     samplecount = (uint16_t)((cnt1 & 0x80u) << 1) | cnt2;
-    PRINT_DEBUG ("samplecount = %d\n\r", samplecount);
+    PRINT_IGNORE ("samplecount = %d\n\r", samplecount);
 
     // Safety clamp to max size of the FIFO as per A_FULL interrupt size
     if (samplecount > MAX_FIFO_SAMPLES) samplecount = MAX_FIFO_SAMPLES;
@@ -940,6 +954,8 @@ static bool read_ppg_fifo (void)
 // As frame rate is set as 100 Hz, the required BLE transfer speed
 // is 24 Bytes every 10 msec i.e. 2400 Bytes per second or 19.2 kbps
 static uint8_t resultArrayPPG[(MAX86171_NUM_MEAS - 1) * 3 * MAX86171_NUM_FRAMES];
+
+static uint8_t PPG_Average_Type[MAX86171_NUM_MEAS - 1];
 
 // To be called after PPG FIFO data has been read
 static void parse_ppg_fifo (void)
@@ -983,6 +999,7 @@ static void parse_ppg_fifo (void)
         // Skip the last (ambient) measurement
         else if (tag == MAX86171_NUM_MEAS)
         {
+            PRINT_SAMPLES ("\n\r");
             continue;
         }
         // MAX86171 datasheet says to ignore samples till tag = 1 after a restart.
@@ -999,12 +1016,20 @@ static void parse_ppg_fifo (void)
         /* Bugfix: average the two 20-bit values after sign-extension */
         uint32_t pd1 = ((uint32_t)p1b0 << 16) | ((uint32_t)p1b1 << 8) | p1b2;
         uint32_t pd2 = ((uint32_t)p2b0 << 16) | ((uint32_t)p2b1 << 8) | p2b2;
-        int32_t avg = (max86171_sext20 (pd1) + max86171_sext20 (pd2)) / 2;
+        int32_t avg, temp = (max86171_sext20 (pd1) + max86171_sext20 (pd2)) / 2;
+        if (PPG_Average_Type[tag - 1] == 1)
+            avg = pd1;
+        else if (PPG_Average_Type[tag - 1] == 2)
+            avg = pd2;
+        else
+            avg = temp;
+        PRINT_SAMPLES ("%ld,", avg);
 
-#if 0
-        // Feed samples to the AGC algorithm for each PPG1/PPG2 pair
-        ppg_agc_feed(&g_agc, &max86171_dev, tag - 1u, avg);
-#endif
+        if (ppg_agc_on == true)
+        {
+            // Feed samples to the AGC algorithm for each PPG1/PPG2 pair
+            ppg_agc_feed(&g_agc, &max86171_dev, tag - 1u, avg);
+        }
 
         // Shouldn't happen due to limiting of samplecount, but add anyway
         // for local safety.
@@ -1289,7 +1314,7 @@ static void run_sweep_statemachine (void)
             {
                 frequency_to_set_khz -= FREQ_STEP_KHZ; 
                 // Wrap around frequency
-                if (frequency_to_set_khz == START_FREQ_KHZ)
+                if (frequency_to_set_khz < START_FREQ_KHZ)
                     frequency_to_set_khz = END_FREQ_KHZ - FREQ_STEP_KHZ;
                 last_set_frequency = 0;
             }
@@ -1396,19 +1421,6 @@ static void dosetlnavgagain (uint8_t temp1, uint8_t temp2)
     }
 }
 
-static void dosetpllgain (uint8_t temp1)
-{
-    if (temp1 <= LMX2572LP_MAX_GAIN)
-    {
-        PRINT_INFO ("Set PLL gain to %d\n\r", temp1);
-        pll_gain = temp1;
-    }
-    else
-    {
-        PRINT_ERROR ("ERROR: invalid argument to set_pll_gain: %d\n\r", temp1);
-    }
-}
-
 static void dosetsweeptiming (int temp1, int temp2)
 {
     if ((temp1 >= 10) && (temp1 <= 6000) && (temp2 >= 10) && (temp2 <= 6000))
@@ -1505,6 +1517,44 @@ static void dostopppg (void)
     stopLedTimer ();
 }
 
+static void dosetppgagc (uint8_t agconoff)
+{
+    if ((agconoff != 1) && (agconoff != 0))
+    {
+        PRINT_ERROR("set_ppg_agc: incorrect argument %d\n\r", agconoff);
+    }
+    else
+    {
+        ppg_agc_on = agconoff;
+    }
+    
+}
+
+static void dosetppgmeas (uint8_t temp0, uint8_t temp1, uint8_t temp2)
+{
+    if ((temp0 == 0) || (temp0 > (MAX86171_NUM_MEAS - 1)))
+    {
+        PRINT_ERROR("set_ppg_meas: incorrect argument %d\n\r", temp0);
+        return;
+    }
+    if ((temp1 == 0) || (temp1 > 3))
+    {
+        PRINT_ERROR("set_ppg_meas: incorrect argument %d\n\r", temp1);
+        return;
+    }
+    // Now use these to set the averaging and LED drive currents for a measurement
+    // Note: Mapping of a LEDx_DRV to DRVA/B/C_SEL is currently fixed for a measurement
+    PPG_Average_Type[temp0 - 1] = temp1;
+    // Only change currents if not 0
+    if (temp2)
+    {
+        // Change registers
+        ppg_agc_force_pa (&g_agc, &max86171_dev, temp0 - 1, temp2);
+        // Also change in the table so that this change is not lost on the next restart
+        max86171_set_config_current(temp0 - 1, temp2);
+    }
+}
+
 #endif
 
 static void dostartaccel (void)
@@ -1570,7 +1620,7 @@ static void processblesetting (char *payload, int len)
         return;
     }
     temp0 = atoi (str);
-    if ((temp0 < 1) || (temp0 > 9))
+    if ((temp0 < 1) || (temp0 > 13))
     {
         PRINT_ERROR ("ERROR: Invalid BLE command\n\r");
         return;
@@ -1682,30 +1732,29 @@ static void processblesetting (char *payload, int len)
         break;
 
         case 9:
-        // Make sure we did receive the field
-        if (temp1_exists == true)
-            dosetpllgain (temp1);
-        else
-        {
-            PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
-        }
-        break;
-
-        case 10:
         dostartaccel ();
         break;
 
-        case 11:
+        case 10:
         dostopaccel ();
         break;
 
 #ifdef USE_PPG
-        case 12:
+        case 11:
         dostartppg ();
         break;
 
-        case 13:
+        case 12:
         dostopppg ();
+        break;
+
+        case 13:
+        if (temp1_exists == true)
+            dosetppgagc (temp1);
+        else
+        {
+            PRINT_ERROR ("ERROR: Missing argument(s) for command %d\n\r", temp0);
+        }
         break;
 #endif
 
@@ -1740,8 +1789,11 @@ SL_WEAK void app_init(void)
     PRINT_INIT ("max86171_init returned %d\n\r", max86171_init(&max86171_dev));
     // Initialise CLI command table
     cli_custom_cmd_init();
-    // Set default value for PPG init variable
+    // Set default value for PPG variables
     ppg_init_done = false;
+    ppg_agc_on = true;
+    // Average both PPG1 & PPG2
+    for (int i = 0; i < MAX86171_NUM_MEAS - 1; i++) PPG_Average_Type[i] = 3;
     // Set default values for variables set by command line
     trigfreq = 0;
     pll_gain = 8;
@@ -2100,17 +2152,6 @@ void cli_set_lna_vga_gain(sl_cli_command_arg_t *arguments)
     uint8_t temp2 = sl_cli_get_argument_uint8(arguments, 1);
     dosetlnavgagain (temp1, temp2);
 }
-void cli_set_pll_gain(sl_cli_command_arg_t *arguments)
-{
-    int argc = sl_cli_get_argument_count(arguments);
-    if (argc != 1)
-    {
-        PRINT_ERROR("set_pll_gain: incorrect number of arguments. Expected 1!\n\r");
-        return;
-    }
-    uint8_t temp1 = sl_cli_get_argument_uint8(arguments, 0);
-    dosetpllgain (temp1);
-}
 
 void cli_start_accel(sl_cli_command_arg_t *arguments)
 {
@@ -2136,6 +2177,32 @@ void cli_stop_ppg(sl_cli_command_arg_t *arguments)
 {
     (void)arguments;
     dostopppg ();
+}
+
+void cli_set_ppg_agc(sl_cli_command_arg_t *arguments)
+{
+    int argc = sl_cli_get_argument_count(arguments);
+    if (argc != 1)
+    {
+        PRINT_ERROR("set_ppg_agc: incorrect number of arguments. Expected 1!\n\r");
+        return;
+    }
+    uint8_t temp = sl_cli_get_argument_uint8(arguments, 0);
+    dosetppgagc (temp);
+}
+
+void cli_set_ppg_meas(sl_cli_command_arg_t *arguments)
+{
+    int argc = sl_cli_get_argument_count(arguments);
+    if (argc != 3)
+    {
+        PRINT_ERROR("set_ppg_meas: incorrect number of arguments. Expected 3!\n\r");
+        return;
+    }
+    uint8_t temp0 = sl_cli_get_argument_uint8(arguments, 0);
+    uint8_t temp1 = sl_cli_get_argument_uint8(arguments, 1);
+    uint8_t temp2 = sl_cli_get_argument_uint8(arguments, 2);
+    dosetppgmeas (temp0, temp1, temp2);
 }
 
 #endif

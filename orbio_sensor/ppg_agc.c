@@ -310,6 +310,8 @@ void ppg_agc_set_enable(ppg_agc_t *agc, uint8_t ch_idx, bool enable)
     agc->ch[ch_idx].enabled = enable;
 }
 
+#endif
+
 /**
  * @brief Force the PA (current) setting for an AGC channel, for all its drivers
  */
@@ -326,7 +328,5 @@ void ppg_agc_force_pa(ppg_agc_t *agc, max86171_t *dev,
     ch->window_cnt      = 0u;
     ch->cooldown_remain = AGC_COOLDOWN_WINDOWS;
 }
-
-#endif
 
 /* End of file */

@@ -419,7 +419,7 @@ void doIADC (void)
     IADC_command(IADC0, iadcCmdEnableTimer);
 #endif
     IADC_command(IADC0, iadcCmdStartScan);
-    exit_atomic ();
+    //exit_atomic ();
     while (conversiondone == false);
 #ifdef USE_ADC_TIMER
     // Disable the IADC timer once a scan is done

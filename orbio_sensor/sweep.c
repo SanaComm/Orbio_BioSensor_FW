@@ -95,7 +95,7 @@ void doOneSweep (int sweepcount)
         uint32_t time2 = sl_sleeptimer_get_tick_count();
 #endif
 
-        enter_atomic ();
+        //enter_atomic ();
         waitForPLLLock ();
 
 #ifdef MEASURE_TIMING

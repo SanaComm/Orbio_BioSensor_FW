@@ -235,7 +235,7 @@ int max86171_status_read_clear(max86171_t *dev) {
     rc = max86171_read_reg(dev, MAX86171_REG_STATUS3, &s3, 1);
     if (rc != MAX86171_OK) return rc;
 
-    PRINT_MAX86171_INFO ("max86171_status_read_clear: %02x, %02x, %02x\n\r", s1, s2, s3);
+    PRINT_MAX86171_IGNORE ("max86171_status_read_clear: %02x, %02x, %02x\n\r", s1, s2, s3);
 
     if (MAX86171_F_GET(MAX86171_STATUS1_A_FULL, s1) != 0)
     {
@@ -267,39 +267,39 @@ int max86171_status_read_clear(max86171_t *dev) {
     }
     if (MAX86171_F_GET(MAX86171_STATUS2_LED9_COMPB, s2) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: LED9_COMPB = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: LED9_COMPB = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS3_LED8_COMPB, s3) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: LED8_COMPB = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: LED8_COMPB = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS3_LED7_COMPB, s3) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: LED7_COMPB = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: LED7_COMPB = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS3_LED6_COMPB, s3) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: LED6_COMPB = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: LED6_COMPB = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS3_LED5_COMPB, s3) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: LED5_COMPB = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: LED5_COMPB = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS3_LED4_COMPB, s3) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: LED4_COMPB = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: LED4_COMPB = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS3_LED3_COMPB, s3) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: LED3_COMPB = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: LED3_COMPB = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS3_LED2_COMPB, s3) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: LED2_COMPB = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: LED2_COMPB = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS3_LED1_COMPB, s3) != 0)
     {
-        PRINT_MAX86171_IGNORE ("max86171_status_read_clear ERROR: LED1_COMPB = 1\n\r");
+        PRINT_MAX86171_INFO ("max86171_status_read_clear ERROR: LED1_COMPB = 1\n\r");
     }
     if (MAX86171_F_GET(MAX86171_STATUS1_PWR_RDY, s1) != 0)
     {
@@ -515,6 +515,22 @@ int max86171_get_config_entry(size_t index, uint8_t *addr, uint8_t *value) {
     if (addr)  *addr  = entry->address;
     if (value) *value = entry->value;
 
+    return MAX86171_OK;
+}
+
+int max86171_set_config_current(size_t index, uint8_t value) {
+    if (index > (MAX86171_NUM_MEAS - 1)) {
+        return MAX86171_E_ARG;
+    }
+   
+    max86171_reg_config_t *entry = &g_max86171_meas_config[index][MAX86171_MEAS_REGS - 3];
+    // Iterate over DRVA, DRVB, DRVC
+    for (int i = 0; i < 3; i++)
+    {
+        // Set new current only if no-zero already
+        if (entry->value) entry->value = value;
+        entry++;
+    }
     return MAX86171_OK;
 }
 

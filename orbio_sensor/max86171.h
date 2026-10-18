@@ -257,7 +257,7 @@ Code  LEDx_DRV Pin 	    Code	LEDx_DRV Pin		Code	LEDx_DRV Pin
  * 6.  The current values given in comments for every DRVx setting do not match calculations.
  */
 
-static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_REGS] = {
+static max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX86171_MEAS_REGS] = {
 
 // MEAS1 [0] — 536nm Green CT (center)
 {
@@ -287,8 +287,8 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS1_DRVA_PA,   0x00u},  /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS1_DRVB_PA,   0x01u},  /* LED5_DRV ~0.12mA    */
-    {MAX86171_REG_MEAS1_DRVC_PA,   0x01u},  /* LED1_DRV ~0.12mA    */
+    {MAX86171_REG_MEAS1_DRVB_PA,   0x05u},  /* LED5_DRV ~0.12mA    */
+    {MAX86171_REG_MEAS1_DRVC_PA,   0x05u},  /* LED1_DRV ~0.12mA    */
 },
 
 // MEAS2 [1] — 536nm Green CT (center)
@@ -318,9 +318,9 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_LED_SETLNG,   1) | /* Default 12us */
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
-        {MAX86171_REG_MEAS2_DRVA_PA,   0x00u},  /* LED1_DRV disabled   */
-        {MAX86171_REG_MEAS2_DRVB_PA,   0x01u},  /* LED5_DRV ~0.12mA    */
-        {MAX86171_REG_MEAS2_DRVC_PA,   0x01u},  /* LED1_DRV ~0.12mA    */
+    {MAX86171_REG_MEAS2_DRVA_PA,   0x00u},  /* LED1_DRV disabled   */
+    {MAX86171_REG_MEAS2_DRVB_PA,   0x05u},  /* LED5_DRV ~0.12mA    */
+    {MAX86171_REG_MEAS2_DRVC_PA,   0x05u},  /* LED1_DRV ~0.12mA    */
 },
 
 // MEAS3 [2] — 950nm IR
@@ -414,9 +414,9 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_LED_SETLNG,   1) | /* Default 12us */
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
-    {MAX86171_REG_MEAS5_DRVA_PA,   0x01u},  /* LED2_DRV ~0.36mA    */
+    {MAX86171_REG_MEAS5_DRVA_PA,   0x05u},  /* LED2_DRV ~0.36mA    */
     {MAX86171_REG_MEAS5_DRVB_PA,   0x00u},  /* LED2_DRV disabled   */
-    {MAX86171_REG_MEAS5_DRVC_PA,   0x01u},  /* LED6_DRV ~0.36mA    */
+    {MAX86171_REG_MEAS5_DRVC_PA,   0x05u},  /* LED6_DRV ~0.36mA    */
 },
 
 // MEAS6 [5] — 660nm Red
@@ -446,9 +446,9 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_LED_SETLNG,   1) | /* Default 12us */
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
-    {MAX86171_REG_MEAS6_DRVA_PA,   0x01u},  /* LED2_DRV ~0.36mA    */
+    {MAX86171_REG_MEAS6_DRVA_PA,   0x05u},  /* LED2_DRV ~0.36mA    */
     {MAX86171_REG_MEAS6_DRVB_PA,   0x00u},  /* LED2_DRV disabled   */
-    {MAX86171_REG_MEAS6_DRVC_PA,   0x01u},  /* LED6_DRV ~0.36mA    */
+    {MAX86171_REG_MEAS6_DRVC_PA,   0x05u},  /* LED6_DRV ~0.36mA    */
 },
 
 // MEAS7 [6] — 526nm Green SFH (outer)
@@ -479,8 +479,8 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS7_DRVA_PA,   0x00u},  /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS7_DRVB_PA,   0x01u},  /* LED8_DRV ~0.48mA    */
-    {MAX86171_REG_MEAS7_DRVC_PA,   0x01u},  /* LED9_DRV ~0.48mA    */
+    {MAX86171_REG_MEAS7_DRVB_PA,   0x05u},  /* LED8_DRV ~0.48mA    */
+    {MAX86171_REG_MEAS7_DRVC_PA,   0x05u},  /* LED9_DRV ~0.48mA    */
 },
 
 // MEAS8 [7] — 526nm Green SFH (outer)
@@ -511,8 +511,8 @@ static const max86171_reg_config_t g_max86171_meas_config[MAX86171_NUM_MEAS][MAX
         MAX86171_F_MAKE(MAX86171_MEAS_PD_SETLNG,    1)}, /* Default 12.1us */
 
     {MAX86171_REG_MEAS8_DRVA_PA,   0x00u},  /* LED1_DRV disabled   */
-    {MAX86171_REG_MEAS8_DRVB_PA,   0x01u},  /* LED8_DRV ~0.48mA    */
-    {MAX86171_REG_MEAS8_DRVC_PA,   0x01u},  /* LED9_DRV ~0.48mA    */
+    {MAX86171_REG_MEAS8_DRVB_PA,   0x05u},  /* LED8_DRV ~0.48mA    */
+    {MAX86171_REG_MEAS8_DRVC_PA,   0x05u},  /* LED9_DRV ~0.48mA    */
 },
 
 // MEAS9 [8] — Ambient (all drivers PA=0)
@@ -699,6 +699,11 @@ size_t max86171_get_config_size(void);
  * @brief Get register configuration entry by index
  */
 int max86171_get_config_entry(size_t index, uint8_t *addr, uint8_t *value);
+
+/*
+ * @brief Set register configuration entry by index
+ */
+int max86171_set_config_current(size_t index, uint8_t value);
 
  /**
   * @brief Shutdown the device
